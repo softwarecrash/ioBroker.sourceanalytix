@@ -52,6 +52,7 @@ class Sourceanalytix extends utils.Adapter {
 		};
 		this.activeStates = {}; // Array of activated states for SourceAnalytix
 		this.dynamicPriceStates = {}; // Dynamic price state ID -> price definition categories
+		this.priceHistories = {}; // Price definition category -> ordered dynamic price history
 		this.validStates = {}; // Array of all created states
 		this.visWidgetJson ={}; // Array containing all calculation values to use in vis widget
 	}
@@ -197,6 +198,475 @@ class Sourceanalytix extends utils.Adapter {
 		return null;
 	}
 
+	/**
+     * @param {any} value - Input value
+     * @param {number} defaultValue - Fallback for non-numeric values
+     * @returns {number}
+     */
+	getNumberOrDefault(value, defaultValue) {
+		const parsedValue = this.parsePriceValue(value);
+		return parsedValue === null ? defaultValue : parsedValue;
+	}
+
+	/**
+     * @param {string} stateID - Source state ID
+     * @returns {boolean}
+     */
+	isDynamicPriceState(stateID) {
+		const activeState = this.activeStates[stateID];
+		return !!(activeState && activeState.prices && activeState.prices.priceSource === 'state');
+	}
+
+	/**
+     * @param {any} timestamp - ioBroker timestamp
+     * @returns {number}
+     */
+	getTimestampOrNow(timestamp) {
+		const parsedTimestamp = Number(timestamp);
+		return Number.isFinite(parsedTimestamp) && parsedTimestamp > 0 ? parsedTimestamp : Date.now();
+	}
+
+	/**
+     * @param {ioBroker.State | null | undefined} state - ioBroker state
+     * @returns {number}
+     */
+	getStateChangeTimestamp(state) {
+		return this.getTimestampOrNow(state && (state.lc || state.ts));
+	}
+
+	/**
+     * @param {string} priceDefinition - Price definition category
+     * @returns {string}
+     */
+	getPriceHistoryStateName(priceDefinition) {
+		return `priceHistory.${priceDefinition.toString().replace(/[^a-zA-Z0-9_-]/g, '_')}`;
+	}
+
+	/**
+     * @param {Array<any>} historyEntries - Raw history entries
+     * @returns {Array<object>}
+     */
+	normalizePriceHistory(historyEntries) {
+		if (!Array.isArray(historyEntries)) return [];
+
+		const normalizedHistory = [];
+		for (const entry of historyEntries) {
+			if (!entry) continue;
+			const timestamp = Number(entry.ts);
+			const price = this.parsePriceValue(entry.price);
+			if (!Number.isFinite(timestamp) || timestamp <= 0 || price === null) continue;
+			normalizedHistory.push({ts: timestamp, price: price});
+		}
+		normalizedHistory.sort((a, b) => a.ts - b.ts);
+
+		const deduplicatedHistory = [];
+		for (const entry of normalizedHistory) {
+			const previousEntry = deduplicatedHistory[deduplicatedHistory.length - 1];
+			if (previousEntry && previousEntry.ts === entry.ts) {
+				previousEntry.price = entry.price;
+			} else if (previousEntry && previousEntry.price === entry.price) {
+				continue;
+			} else {
+				deduplicatedHistory.push(entry);
+			}
+		}
+		return deduplicatedHistory;
+	}
+
+	/**
+     * @param {string} priceDefinition - Price definition category
+     */
+	async ensurePriceHistoryState(priceDefinition) {
+		const stateName = this.getPriceHistoryStateName(priceDefinition);
+		await this.extendObjectAsync(stateName, {
+			type: 'state',
+			common: {
+				name: `Price history ${priceDefinition}`,
+				type: 'string',
+				role: 'json',
+				read: true,
+				write: false,
+				def: '[]',
+			},
+			native: {
+				priceDefinition: priceDefinition
+			},
+		});
+	}
+
+	/**
+     * @param {string} priceDefinition - Price definition category
+     * @returns {Promise<Array<object>>}
+     */
+	async loadPriceHistory(priceDefinition) {
+		if (this.priceHistories[priceDefinition]) return this.priceHistories[priceDefinition];
+
+		await this.ensurePriceHistoryState(priceDefinition);
+		const stateName = this.getPriceHistoryStateName(priceDefinition);
+		const historyState = await this.getStateAsync(stateName);
+		let historyEntries = [];
+		if (historyState && historyState.val) {
+			try {
+				historyEntries = JSON.parse(historyState.val.toString());
+			} catch (error) {
+				this.log.warn(`[loadPriceHistory] Cannot parse dynamic price history for ${priceDefinition}: ${error.message}`);
+			}
+		}
+		this.priceHistories[priceDefinition] = this.normalizePriceHistory(historyEntries);
+		return this.priceHistories[priceDefinition];
+	}
+
+	/**
+     * @param {string} priceDefinition - Price definition category
+     */
+	async persistPriceHistory(priceDefinition) {
+		await this.ensurePriceHistoryState(priceDefinition);
+		const stateName = this.getPriceHistoryStateName(priceDefinition);
+		await this.setStateAsync(stateName, {
+			val: JSON.stringify(this.priceHistories[priceDefinition] || []),
+			ack: true
+		});
+	}
+
+	/**
+     * @param {string} priceDefinition - Price definition category
+     * @param {any} price - Dynamic unit price
+     * @param {any} timestamp - Timestamp from price state
+     * @returns {Promise<boolean>}
+     */
+	async storeDynamicPriceHistory(priceDefinition, price, timestamp) {
+		const priceNumber = this.parsePriceValue(price);
+		if (priceNumber === null) {
+			this.log.warn(`[storeDynamicPriceHistory] Cannot store dynamic price ${JSON.stringify(price)} for ${priceDefinition}, value is not numeric`);
+			return false;
+		}
+
+		const history = await this.loadPriceHistory(priceDefinition);
+		const priceTimestamp = this.getTimestampOrNow(timestamp);
+		const existingEntry = history.find(entry => entry.ts === priceTimestamp);
+		if (existingEntry) {
+			if (existingEntry.price === priceNumber) return false;
+			existingEntry.price = priceNumber;
+			this.priceHistories[priceDefinition] = this.normalizePriceHistory(history);
+			await this.persistPriceHistory(priceDefinition);
+			return true;
+		}
+
+		const previousEntry = history.reduce((previous, entry) => {
+			if (entry.ts <= priceTimestamp && (!previous || entry.ts > previous.ts)) return entry;
+			return previous;
+		}, null);
+		if (previousEntry && previousEntry.price === priceNumber) return false;
+
+		history.push({ts: priceTimestamp, price: priceNumber});
+		this.priceHistories[priceDefinition] = this.normalizePriceHistory(history);
+		await this.persistPriceHistory(priceDefinition);
+		this.log.info(`Stored dynamic price ${priceNumber} for ${priceDefinition} at ${new Date(priceTimestamp).toISOString()}`);
+		return true;
+	}
+
+	/**
+     * @param {string} priceDefinition - Price definition category
+     * @param {number} timestamp - Consumption timestamp
+     * @param {any} fallbackPrice - Fallback unit price
+     * @returns {Promise<number | null>}
+     */
+	async getDynamicPriceForTimestamp(priceDefinition, timestamp, fallbackPrice) {
+		const priceTimestamp = this.getTimestampOrNow(timestamp);
+		const history = await this.loadPriceHistory(priceDefinition);
+		let selectedEntry = null;
+		for (const entry of history) {
+			if (entry.ts <= priceTimestamp) {
+				selectedEntry = entry;
+			} else {
+				break;
+			}
+		}
+		if (selectedEntry) return selectedEntry.price;
+
+		const fallbackPriceNumber = this.parsePriceValue(fallbackPrice);
+		if (fallbackPriceNumber !== null) return fallbackPriceNumber;
+		return history.length > 0 ? history[0].price : null;
+	}
+
+	/**
+     * Split a cumulative meter delta over all dynamic price intervals between two readings.
+     * @param {string} priceDefinition - Price definition category
+     * @param {number} delta - Consumption delta
+     * @param {any} startTimestamp - Previous reading timestamp
+     * @param {any} endTimestamp - Current reading timestamp
+     * @param {any} fallbackPrice - Fallback unit price
+     * @returns {Promise<number | null>}
+     */
+	async calculateDynamicPriceDelta(priceDefinition, delta, startTimestamp, endTimestamp, fallbackPrice) {
+		const startTs = Number(startTimestamp);
+		const endTs = this.getTimestampOrNow(endTimestamp);
+		if (!Number.isFinite(startTs) || startTs <= 0 || startTs >= endTs) {
+			const priceAtReading = await this.getDynamicPriceForTimestamp(priceDefinition, endTs, fallbackPrice);
+			return priceAtReading === null ? null : delta * priceAtReading;
+		}
+
+		const history = await this.loadPriceHistory(priceDefinition);
+		const intervalChanges = history.filter(entry => entry.ts > startTs && entry.ts < endTs);
+		if (intervalChanges.length === 0) {
+			const priceAtReading = await this.getDynamicPriceForTimestamp(priceDefinition, endTs, fallbackPrice);
+			return priceAtReading === null ? null : delta * priceAtReading;
+		}
+
+		const totalDuration = endTs - startTs;
+		let segmentStart = startTs;
+		let priceDelta = 0;
+
+		for (const change of intervalChanges) {
+			const segmentPrice = await this.getDynamicPriceForTimestamp(priceDefinition, segmentStart, fallbackPrice);
+			if (segmentPrice === null) return null;
+			priceDelta += delta * ((change.ts - segmentStart) / totalDuration) * segmentPrice;
+			segmentStart = change.ts;
+		}
+
+		const finalSegmentPrice = await this.getDynamicPriceForTimestamp(priceDefinition, segmentStart, fallbackPrice);
+		if (finalSegmentPrice === null) return null;
+		priceDelta += delta * ((endTs - segmentStart) / totalDuration) * finalSegmentPrice;
+		return priceDelta;
+	}
+
+	/**
+     * @param {number} reading - Current cumulative reading
+     * @param {object} calcValues - Stored period start values
+     * @param {number} unitPrice - Unit price for fallback calculation
+     * @returns {object}
+     */
+	getFallbackDynamicCostTotals(reading, calcValues, unitPrice) {
+		return {
+			priceDay: unitPrice * (reading - this.getNumberOrDefault(calcValues.start_day, reading)),
+			priceWeek: unitPrice * (reading - this.getNumberOrDefault(calcValues.start_week, reading)),
+			priceMonth: unitPrice * (reading - this.getNumberOrDefault(calcValues.start_month, reading)),
+			priceQuarter: unitPrice * (reading - this.getNumberOrDefault(calcValues.start_quarter, reading)),
+			priceYear: unitPrice * (reading - this.getNumberOrDefault(calcValues.start_year, reading)),
+		};
+	}
+
+	/**
+     * @param {string} stateID - Local ioBroker state ID
+     * @param {number} fallback - Fallback value
+     * @returns {Promise<number>}
+     */
+	async readCostStateOrFallback(stateID, fallback) {
+		try {
+			const state = await this.getStateAsync(stateID);
+			const stateValue = state ? this.parsePriceValue(state.val) : null;
+			return stateValue === null ? fallback : stateValue;
+		} catch (error) {
+			this.log.debug(`[readCostStateOrFallback] Could not read ${stateID}, using fallback ${fallback}: ${error.message}`);
+			return fallback;
+		}
+	}
+
+	/**
+     * @param {object} dynamicCosts - Dynamic cost memory
+     * @returns {Promise<object>}
+     */
+	async roundDynamicCostTotals(dynamicCosts) {
+		return {
+			priceDay: await this.roundCosts(this.getNumberOrDefault(dynamicCosts.totals.priceDay, 0)),
+			priceWeek: await this.roundCosts(this.getNumberOrDefault(dynamicCosts.totals.priceWeek, 0)),
+			priceMonth: await this.roundCosts(this.getNumberOrDefault(dynamicCosts.totals.priceMonth, 0)),
+			priceQuarter: await this.roundCosts(this.getNumberOrDefault(dynamicCosts.totals.priceQuarter, 0)),
+			priceYear: await this.roundCosts(this.getNumberOrDefault(dynamicCosts.totals.priceYear, 0)),
+		};
+	}
+
+	/**
+     * Initialise dynamic cost memory from existing states, so restarts do not revalue past consumption.
+     * @param {string} stateID - Source state ID
+     * @param {number} reading - Current cumulative reading
+     * @param {any} timestamp - Timestamp of the current reading
+     * @returns {Promise<object | null>}
+     */
+	async ensureDynamicCostMemory(stateID, reading, timestamp) {
+		if (!this.isDynamicPriceState(stateID)) return null;
+		if (!this.activeStates[stateID] || !this.activeStates[stateID].stateDetails || !this.activeStates[stateID].calcValues) return null;
+
+		const readingNumber = this.parsePriceValue(reading);
+		const readingTimestamp = this.getTimestampOrNow(timestamp);
+		if (readingNumber === null) {
+			this.log.warn(`[ensureDynamicCostMemory] Cannot initialize dynamic costs for ${stateID}, reading ${JSON.stringify(reading)} is not numeric`);
+			return null;
+		}
+
+		const activeState = this.activeStates[stateID];
+		if (activeState.dynamicCosts && activeState.dynamicCosts.totals) {
+			if (activeState.dynamicCosts.lastReading === null || activeState.dynamicCosts.lastReading === undefined) {
+				activeState.dynamicCosts.lastReading = readingNumber;
+			}
+			if (activeState.dynamicCosts.lastTs === null || activeState.dynamicCosts.lastTs === undefined) {
+				activeState.dynamicCosts.lastTs = readingTimestamp;
+			}
+			return activeState.dynamicCosts;
+		}
+
+		const unitPrice = this.getNumberOrDefault(activeState.prices.unitPrice, 0);
+		const fallbackTotals = this.getFallbackDynamicCostTotals(readingNumber, activeState.calcValues, unitPrice);
+		const stateRoot = `${activeState.stateDetails.deviceName}.currentYear.${activeState.stateDetails.financialCategory}`;
+		const totals = {
+			priceDay: await this.readCostStateOrFallback(`${stateRoot}.01_currentDay`, fallbackTotals.priceDay),
+			priceWeek: await this.readCostStateOrFallback(`${stateRoot}.02_currentWeek`, fallbackTotals.priceWeek),
+			priceMonth: await this.readCostStateOrFallback(`${stateRoot}.03_currentMonth`, fallbackTotals.priceMonth),
+			priceQuarter: await this.readCostStateOrFallback(`${stateRoot}.04_currentQuarter`, fallbackTotals.priceQuarter),
+			priceYear: await this.readCostStateOrFallback(`${stateRoot}.05_currentYear`, fallbackTotals.priceYear),
+		};
+
+		activeState.dynamicCosts = {
+			lastReading: readingNumber,
+			lastTs: readingTimestamp,
+			totals: totals
+		};
+		this.log.debug(`[ensureDynamicCostMemory] Initialized dynamic costs for ${stateID}: ${JSON.stringify(activeState.dynamicCosts)}`);
+		return activeState.dynamicCosts;
+	}
+
+	/**
+     * Add the newly consumed delta to dynamic cost totals with the active unit price.
+     * @param {string} stateID - Source state ID
+     * @param {number} reading - Current cumulative reading
+     * @param {any} timestamp - Timestamp of the current reading
+     * @returns {Promise<object | null>}
+     */
+	async calculateDynamicCostsForState(stateID, reading, timestamp) {
+		const dynamicCosts = await this.ensureDynamicCostMemory(stateID, reading, timestamp);
+		if (!dynamicCosts) return null;
+
+		const readingNumber = this.parsePriceValue(reading);
+		const activeState = this.activeStates[stateID];
+		const readingTimestamp = this.getTimestampOrNow(timestamp);
+		if (readingNumber === null) {
+			this.log.warn(`[calculateDynamicCostsForState] Cannot calculate dynamic costs for ${stateID}, reading ${JSON.stringify(reading)} is not numeric`);
+			return this.roundDynamicCostTotals(dynamicCosts);
+		}
+
+		const lastReading = this.parsePriceValue(dynamicCosts.lastReading);
+		if (lastReading === null) {
+			dynamicCosts.lastReading = readingNumber;
+			dynamicCosts.lastTs = readingTimestamp;
+			return this.roundDynamicCostTotals(dynamicCosts);
+		}
+
+		const delta = readingNumber - lastReading;
+		if (delta < 0) {
+			this.log.warn(`[calculateDynamicCostsForState] Cumulative reading for ${stateID} decreased from ${lastReading} to ${readingNumber}, resetting dynamic cost tracker`);
+			dynamicCosts.lastReading = readingNumber;
+			dynamicCosts.lastTs = readingTimestamp;
+			return this.roundDynamicCostTotals(dynamicCosts);
+		}
+
+		if (delta > 0) {
+			const priceDelta = await this.calculateDynamicPriceDelta(activeState.stateDetails.stateType, delta, dynamicCosts.lastTs, readingTimestamp, activeState.prices.unitPrice);
+			if (priceDelta === null) {
+				this.log.warn(`[calculateDynamicCostsForState] Cannot calculate dynamic costs for ${stateID}, no valid price found for ${new Date(readingTimestamp).toISOString()}`);
+				return this.roundDynamicCostTotals(dynamicCosts);
+			}
+			dynamicCosts.totals.priceDay = this.getNumberOrDefault(dynamicCosts.totals.priceDay, 0) + priceDelta;
+			dynamicCosts.totals.priceWeek = this.getNumberOrDefault(dynamicCosts.totals.priceWeek, 0) + priceDelta;
+			dynamicCosts.totals.priceMonth = this.getNumberOrDefault(dynamicCosts.totals.priceMonth, 0) + priceDelta;
+			dynamicCosts.totals.priceQuarter = this.getNumberOrDefault(dynamicCosts.totals.priceQuarter, 0) + priceDelta;
+			dynamicCosts.totals.priceYear = this.getNumberOrDefault(dynamicCosts.totals.priceYear, 0) + priceDelta;
+			dynamicCosts.lastReading = readingNumber;
+			dynamicCosts.lastTs = readingTimestamp;
+			this.log.debug(`[calculateDynamicCostsForState] Added dynamic cost delta ${priceDelta} for ${delta} consumption from ${stateID} at ${new Date(readingTimestamp).toISOString()}`);
+		} else if (readingTimestamp > this.getNumberOrDefault(dynamicCosts.lastTs, 0)) {
+			dynamicCosts.lastTs = readingTimestamp;
+		}
+
+		return this.roundDynamicCostTotals(dynamicCosts);
+	}
+
+	/**
+     * Reset dynamic cost totals when period start values are reset.
+     * @param {string} stateID - Source state ID
+     * @param {number} reading - Current cumulative reading
+     * @param {object} beforeReset - Date information before reset
+     */
+	resetDynamicCostMemory(stateID, reading, beforeReset) {
+		if (!this.isDynamicPriceState(stateID)) return;
+
+		const activeState = this.activeStates[stateID];
+		const readingNumber = this.parsePriceValue(reading);
+		if (!activeState || readingNumber === null) return;
+
+		const existingTotals = activeState.dynamicCosts && activeState.dynamicCosts.totals ? activeState.dynamicCosts.totals : {};
+		activeState.dynamicCosts = {
+			lastReading: readingNumber,
+			lastTs: Date.now(),
+			totals: {
+				priceDay: 0,
+				priceWeek: beforeReset.week === actualDate.week ? this.getNumberOrDefault(existingTotals.priceWeek, 0) : 0,
+				priceMonth: beforeReset.month === actualDate.month ? this.getNumberOrDefault(existingTotals.priceMonth, 0) : 0,
+				priceQuarter: beforeReset.quarter === actualDate.quarter ? this.getNumberOrDefault(existingTotals.priceQuarter, 0) : 0,
+				priceYear: beforeReset.year === actualDate.year ? this.getNumberOrDefault(existingTotals.priceYear, 0) : 0,
+			}
+		};
+		this.log.debug(`[resetDynamicCostMemory] Reset dynamic costs for ${stateID}: ${JSON.stringify(activeState.dynamicCosts)}`);
+	}
+
+	/**
+     * Write financial calculation states.
+     * @param {string} stateID - Source state ID
+     * @param {object} calculationRounded - Rounded calculation values
+     * @param {Date} date - Current date
+     */
+	async writeFinancialStates(stateID, calculationRounded, date) {
+		if (!this.activeStates[stateID] || !this.activeStates[stateID].stateDetails) return;
+
+		const stateDetails = this.activeStates[stateID].stateDetails;
+		let stateName = `${this.namespace}.${stateDetails.deviceName}.currentYear.${stateDetails.financialCategory}`;
+		await this.setStateChangedAsync(`${stateName}.01_currentDay`, {
+			val: calculationRounded.priceDay,
+			ack: true
+		});
+		await this.setStateChangedAsync(`${stateName}.02_currentWeek`, {
+			val: calculationRounded.priceWeek,
+			ack: true
+		});
+		await this.setStateChangedAsync(`${stateName}.03_currentMonth`, {
+			val: calculationRounded.priceMonth,
+			ack: true
+		});
+		await this.setStateChangedAsync(`${stateName}.04_currentQuarter`, {
+			val: calculationRounded.priceQuarter,
+			ack: true
+		});
+		await this.setStateChangedAsync(`${stateName}.05_currentYear`, {
+			val: calculationRounded.priceYear,
+			ack: true
+		});
+
+		if (this.config.store_weeks || this.config.store_months || this.config.store_quarters) {
+			await this.setStateChangedAsync(`${this.namespace}.${stateDetails.deviceName}.${actualDate.year}.${stateDetails.financialCategory}Cumulative`, {
+				val: calculationRounded.priceYear,
+				ack: true
+			});
+		}
+
+		await this.setStateChangedAsync(`${stateName}.currentWeek.${weekdays[date.getDay()]}`, {
+			val: calculationRounded.priceDay,
+			ack: true
+		});
+
+		stateName = `${this.namespace}.${stateDetails.deviceName}.${actualDate.year}.${stateDetails.financialCategory}`;
+		if (storeSettings.storeWeeks) await this.setStateChangedAsync(`${stateName}.weeks.${actualDate.week}`, {
+			val: calculationRounded.priceWeek,
+			ack: true
+		});
+		if (storeSettings.storeMonths) await this.setStateChangedAsync(`${stateName}.months.${actualDate.month}`, {
+			val: calculationRounded.priceMonth,
+			ack: true
+		});
+		if (storeSettings.storeQuarters) await this.setStateChangedAsync(`${stateName}.quarters.Q${actualDate.quarter}`, {
+			val: calculationRounded.priceQuarter,
+			ack: true
+		});
+	}
+
 	//ToDo 0.5: Implement cleanup for unused states
 	// async cleanupUnused() {
 	//     const allStates = await this.getAdapterObjectsAsync()
@@ -244,9 +714,10 @@ class Sourceanalytix extends utils.Adapter {
 				const priceState = priceSource === 'state' && typeof priceConfig.priceState === 'string' ? priceConfig.priceState.trim() : '';
 				const configuredUnitPrice = this.parsePriceValue(priceConfig.uPpU);
 				const configuredBasicPrice = this.parsePriceValue(priceConfig.uPpM);
-				let unitPrice = configuredUnitPrice === null ? priceConfig.uPpU : configuredUnitPrice;
+				let unitPrice = configuredUnitPrice;
 
 				if (priceSource === 'state') {
+					await this.ensurePriceHistoryState(priceConfig.cat);
 					if (priceState) {
 						if (!this.dynamicPriceStates[priceState]) {
 							this.dynamicPriceStates[priceState] = [];
@@ -258,6 +729,7 @@ class Sourceanalytix extends utils.Adapter {
 						const dynamicUnitPrice = priceStateValue ? this.parsePriceValue(priceStateValue.val) : null;
 						if (dynamicUnitPrice !== null) {
 							unitPrice = dynamicUnitPrice;
+							await this.storeDynamicPriceHistory(priceConfig.cat, dynamicUnitPrice, this.getStateChangeTimestamp(priceStateValue));
 							this.log.info(`Loaded dynamic unit price ${unitPrice} for ${priceConfig.cat} from ${priceState}`);
 						} else {
 							this.log.warn(`Dynamic price state ${priceState} for ${priceConfig.cat} has no valid numeric value, using configured fallback price ${priceConfig.uPpU}`);
@@ -265,6 +737,11 @@ class Sourceanalytix extends utils.Adapter {
 					} else {
 						this.log.warn(`Price definition ${priceConfig.cat} uses dynamic price source but no state ID is configured, using configured fallback price ${priceConfig.uPpU}`);
 					}
+				}
+
+				if (unitPrice === null) {
+					this.log.warn(`Price definition ${priceConfig.cat} has no valid unit price ${JSON.stringify(priceConfig.uPpU)}, using 0 to avoid invalid cost calculations`);
+					unitPrice = 0;
 				}
 
 				priceStore[priceConfig.cat] = {
@@ -382,7 +859,8 @@ class Sourceanalytix extends utils.Adapter {
 				}
 
 				// Load price definition from settings & library
-				const stateType = this.unitPriceDef.pricesConfig[customData.selectedPrice].costType;
+				const selectedPriceConfig = this.unitPriceDef.pricesConfig[customData.selectedPrice];
+				const stateType = selectedPriceConfig.costType;
 
 				// Load state settings to memory
 				this.activeStates[stateID] = {
@@ -397,7 +875,7 @@ class Sourceanalytix extends utils.Adapter {
 						name: stateInfo.common.name !== '' ? customData.alias : 'No name known, please provide alias',
 						stateType: customData.selectedPrice,
 						stateUnit: useUnit,
-						useUnit: this.unitPriceDef.pricesConfig[customData.selectedPrice].unitType,
+						useUnit: selectedPriceConfig.unitType,
 						deviceResetLogicEnabled: customData.deviceResetLogicEnabled != null ? customData.deviceResetLogicEnabled || true : true,
 						threshold: customData.threshold != null ? customData.threshold || 1 : 1,
 					},
@@ -412,8 +890,10 @@ class Sourceanalytix extends utils.Adapter {
 						valueAtDeviceInit: valueAtDeviceInit,
 					},
 					prices: {
-						basicPrice: this.unitPriceDef.pricesConfig[customData.selectedPrice].uPpM,
-						unitPrice: this.unitPriceDef.pricesConfig[customData.selectedPrice].uPpU,
+						basicPrice: selectedPriceConfig.uPpM,
+						unitPrice: selectedPriceConfig.uPpU,
+						priceSource: selectedPriceConfig.priceSource,
+						priceState: selectedPriceConfig.priceState,
 					},
 				};
 
@@ -657,6 +1137,7 @@ class Sourceanalytix extends utils.Adapter {
 				}
 
 				const previousPrice = priceConfig.uPpU;
+				await this.storeDynamicPriceHistory(priceDefinition, unitPrice, this.getStateChangeTimestamp(state));
 				priceConfig.uPpU = unitPrice;
 				this.log.info(`Dynamic unit price for ${priceDefinition} changed from ${previousPrice} to ${unitPrice}`);
 
@@ -664,7 +1145,6 @@ class Sourceanalytix extends utils.Adapter {
 					const activeState = this.activeStates[stateID];
 					if (activeState && activeState.stateDetails && activeState.stateDetails.stateType === priceDefinition) {
 						activeState.prices.unitPrice = unitPrice;
-						await this.recalculateCostsForState(stateID, `dynamic price update from ${priceStateID}`);
 					}
 				}
 			}
@@ -688,6 +1168,10 @@ class Sourceanalytix extends utils.Adapter {
 			const reading = calcValues.cumulativeValue;
 
 			if (!stateDetails.costs) return;
+			if (this.isDynamicPriceState(stateID)) {
+				this.log.debug(`[recalculateCostsForState] Skipped dynamic cost recalculation for ${stateID} because dynamic prices are historical`);
+				return;
+			}
 			if (reading === null || reading === undefined) {
 				this.log.warn(`[recalculateCostsForState] Cannot recalculate costs for ${stateID}, cumulative reading is not available`);
 				return;
@@ -700,7 +1184,6 @@ class Sourceanalytix extends utils.Adapter {
 			}
 
 			const date = new Date();
-			let stateName = `${this.namespace}.${stateDetails.deviceName}.currentYear.${stateDetails.financialCategory}`;
 			const calculationRounded = {
 				priceDay: await this.roundCosts(unitPrice * (reading - calcValues.start_day)),
 				priceWeek: await this.roundCosts(unitPrice * (reading - calcValues.start_week)),
@@ -709,52 +1192,7 @@ class Sourceanalytix extends utils.Adapter {
 				priceYear: await this.roundCosts(unitPrice * (reading - calcValues.start_year)),
 			};
 
-			await this.setStateChangedAsync(`${stateName}.01_currentDay`, {
-				val: calculationRounded.priceDay,
-				ack: true
-			});
-			await this.setStateChangedAsync(`${stateName}.02_currentWeek`, {
-				val: calculationRounded.priceWeek,
-				ack: true
-			});
-			await this.setStateChangedAsync(`${stateName}.03_currentMonth`, {
-				val: calculationRounded.priceMonth,
-				ack: true
-			});
-			await this.setStateChangedAsync(`${stateName}.04_currentQuarter`, {
-				val: calculationRounded.priceQuarter,
-				ack: true
-			});
-			await this.setStateChangedAsync(`${stateName}.05_currentYear`, {
-				val: calculationRounded.priceYear,
-				ack: true
-			});
-
-			if (this.config.store_weeks || this.config.store_months || this.config.store_quarters) {
-				await this.setStateChangedAsync(`${this.namespace}.${stateDetails.deviceName}.${actualDate.year}.${stateDetails.financialCategory}Cumulative`, {
-					val: calculationRounded.priceYear,
-					ack: true
-				});
-			}
-
-			await this.setStateChangedAsync(`${stateName}.currentWeek.${weekdays[date.getDay()]}`, {
-				val: calculationRounded.priceDay,
-				ack: true
-			});
-
-			stateName = `${this.namespace}.${stateDetails.deviceName}.${actualDate.year}.${stateDetails.financialCategory}`;
-			if (storeSettings.storeWeeks) await this.setStateChangedAsync(`${stateName}.weeks.${actualDate.week}`, {
-				val: calculationRounded.priceWeek,
-				ack: true
-			});
-			if (storeSettings.storeMonths) await this.setStateChangedAsync(`${stateName}.months.${actualDate.month}`, {
-				val: calculationRounded.priceMonth,
-				ack: true
-			});
-			if (storeSettings.storeQuarters) await this.setStateChangedAsync(`${stateName}.quarters.Q${actualDate.quarter}`, {
-				val: calculationRounded.priceQuarter,
-				ack: true
-			});
+			await this.writeFinancialStates(stateID, calculationRounded, date);
 
 			previousCalculationRounded[stateID] = {
 				...previousCalculationRounded[stateID],
@@ -860,6 +1298,7 @@ class Sourceanalytix extends utils.Adapter {
 
 						this.activeStates[stateID].calcValues = obj.common.custom[this.namespace];
 						this.activeStates[stateID].calcValues.cumulativeValue = reading;
+						this.resetDynamicCostMemory(stateID, reading, beforeReset);
 
 						//At week reset ensure current week values are moved to previous week and current set to 0
 						if (beforeReset.week !== actualDate.week) {
@@ -1327,6 +1766,7 @@ class Sourceanalytix extends utils.Adapter {
 			const currentCath = this.unitPriceDef.unitConfig[stateDetails.stateUnit].category;
 			const targetCath = this.unitPriceDef.unitConfig[stateDetails.useUnit].category;
 			const date = new Date();
+			const readingTimestamp = this.getStateChangeTimestamp(stateVal);
 
 			this.log.debug(`[calculationHandler] calcValues : ${JSON.stringify(calcValues)}`);
 			this.log.debug(`[calculationHandler] stateDetails : ${JSON.stringify(stateDetails)}`);
@@ -1472,6 +1912,11 @@ class Sourceanalytix extends utils.Adapter {
 			//TODO 0.5: Implement periods
 			// temporary set to Zero, this value will be used later to handle period calculations
 			const reading_start = 0; //obj_cust.start_meassure;
+			const parsedUnitPrice = this.parsePriceValue(statePrices.unitPrice);
+			const unitPrice = parsedUnitPrice === null ? 0 : parsedUnitPrice;
+			if (stateDetails.costs && parsedUnitPrice === null) {
+				this.log.warn(`[calculationHandler] Unit price ${JSON.stringify(statePrices.unitPrice)} for ${stateID} is not numeric, using 0 to avoid invalid cost calculations`);
+			}
 
 			this.log.debug(`[calculationHandler] PreviousCalculationRounded for ${stateID} : ${JSON.stringify(previousCalculationRounded[stateID])}`);
 
@@ -1512,11 +1957,11 @@ class Sourceanalytix extends utils.Adapter {
 				consumedMonth: ((reading - calcValues.start_month) - reading_start),
 				consumedQuarter: ((reading - calcValues.start_quarter) - reading_start),
 				consumedYear: ((reading - calcValues.start_year) - reading_start),
-				priceDay: statePrices.unitPrice * ((reading - calcValues.start_day) - reading_start),
-				priceWeek: statePrices.unitPrice * ((reading - calcValues.start_week) - reading_start),
-				priceMonth: statePrices.unitPrice * ((reading - calcValues.start_month) - reading_start),
-				priceQuarter: statePrices.unitPrice * ((reading - calcValues.start_quarter) - reading_start),
-				priceYear: statePrices.unitPrice * ((reading - calcValues.start_year) - reading_start),
+				priceDay: unitPrice * ((reading - calcValues.start_day) - reading_start),
+				priceWeek: unitPrice * ((reading - calcValues.start_week) - reading_start),
+				priceMonth: unitPrice * ((reading - calcValues.start_month) - reading_start),
+				priceQuarter: unitPrice * ((reading - calcValues.start_quarter) - reading_start),
+				priceYear: unitPrice * ((reading - calcValues.start_year) - reading_start),
 			};
 
 			this.log.debug(`[calculationHandler] Result of calculation: ${JSON.stringify(calculations)}`);
@@ -1528,12 +1973,23 @@ class Sourceanalytix extends utils.Adapter {
 				consumedMonth: await this.roundDigits(calculations.consumedMonth),
 				consumedQuarter: await this.roundDigits(calculations.consumedQuarter),
 				consumedYear: await this.roundDigits(calculations.consumedYear),
-				priceDay: await this.roundCosts(statePrices.unitPrice * calculations.consumedDay),
-				priceWeek: await this.roundCosts(statePrices.unitPrice * calculations.consumedWeek),
-				priceMonth: await this.roundCosts(statePrices.unitPrice * calculations.consumedMonth),
-				priceQuarter: await this.roundCosts(statePrices.unitPrice * calculations.consumedQuarter),
-				priceYear: await this.roundCosts(statePrices.unitPrice * calculations.consumedYear),
+				priceDay: await this.roundCosts(unitPrice * calculations.consumedDay),
+				priceWeek: await this.roundCosts(unitPrice * calculations.consumedWeek),
+				priceMonth: await this.roundCosts(unitPrice * calculations.consumedMonth),
+				priceQuarter: await this.roundCosts(unitPrice * calculations.consumedQuarter),
+				priceYear: await this.roundCosts(unitPrice * calculations.consumedYear),
 			};
+
+			if (this.isDynamicPriceState(stateID)) {
+				const dynamicCalculationRounded = await this.calculateDynamicCostsForState(stateID, reading, readingTimestamp);
+				if (dynamicCalculationRounded) {
+					calculationRounded.priceDay = dynamicCalculationRounded.priceDay;
+					calculationRounded.priceWeek = dynamicCalculationRounded.priceWeek;
+					calculationRounded.priceMonth = dynamicCalculationRounded.priceMonth;
+					calculationRounded.priceQuarter = dynamicCalculationRounded.priceQuarter;
+					calculationRounded.priceYear = dynamicCalculationRounded.priceYear;
+				}
+			}
 
 			// this.visWidgetJson[stateID].date = calculationRounded;
 			this.log.debug(`[calculationHandler] Result of rounding: ${JSON.stringify(calculations)}`);
@@ -1599,59 +2055,7 @@ class Sourceanalytix extends utils.Adapter {
 
 			// Store prices
 			if (stateDetails.costs) {
-
-				stateName = `${this.namespace}.${stateDetails.deviceName}.currentYear.${stateDetails.financialCategory}`;
-				// Generic
-				await this.setStateChangedAsync(`${stateName}.01_currentDay`, {
-					val: calculationRounded.priceDay,
-					ack: true
-				});
-				await this.setStateChangedAsync(`${stateName}.02_currentWeek`, {
-					val: calculationRounded.priceWeek,
-					ack: true
-				});
-				await this.setStateChangedAsync(`${stateName}.03_currentMonth`, {
-					val: calculationRounded.priceMonth,
-					ack: true
-				});
-				await this.setStateChangedAsync(`${stateName}.04_currentQuarter`, {
-					val: calculationRounded.priceQuarter,
-					ack: true
-				});
-				await this.setStateChangedAsync(`${stateName}.05_currentYear`, {
-					val: calculationRounded.priceYear,
-					ack: true
-				});
-
-				if (this.config.store_weeks || this.config.store_months || this.config.store_quarters) {
-					await this.setStateChangedAsync(`${this.namespace}.${stateDetails.deviceName}.${actualDate.year}.${stateDetails.financialCategory}Cumulative`, {
-						val: calculationRounded.priceYear,
-						ack: true
-					});
-				}
-
-				// Weekdays
-				await this.setStateChangedAsync(`${stateName}.currentWeek.${weekdays[date.getDay()]}`, {
-					val: calculationRounded.priceDay,
-					ack: true
-				});
-
-				stateName = `${this.namespace}.${stateDetails.deviceName}.${actualDate.year}.${stateDetails.financialCategory}`;
-				// Week
-				if (storeSettings.storeWeeks) await this.setStateChangedAsync(`${stateName}.weeks.${actualDate.week}`, {
-					val: calculationRounded.priceWeek,
-					ack: true
-				});
-				// Month
-				if (storeSettings.storeMonths) await this.setStateChangedAsync(`${stateName}.months.${actualDate.month}`, {
-					val: calculationRounded.priceMonth,
-					ack: true
-				});
-				// Quarter
-				if (storeSettings.storeQuarters) await this.setStateChangedAsync(`${stateName}.quarters.Q${actualDate.quarter}`, {
-					val: calculationRounded.priceQuarter,
-					ack: true
-				});
+				await this.writeFinancialStates(stateID, calculationRounded, date);
 
 			}
 
@@ -1704,13 +2108,18 @@ class Sourceanalytix extends utils.Adapter {
      */
 	async roundCosts(value) {
 		try {
-			let rounded = Number(value);
+			const numericValue = Number(value);
+			if (!Number.isFinite(numericValue)) {
+				this.log.warn(`roundCosts received non-numeric value ${JSON.stringify(value)}, returning 0`);
+				return 0;
+			}
+			let rounded = numericValue;
 			rounded = Math.round(rounded * 100) / 100;
 			this.log.debug(`roundCosts with ${value} rounded ${rounded}`);
-			if (!rounded) return value;
 			return rounded;
 		} catch (error) {
 			this.errorHandling(`[roundCosts] ${value}`, error);
+			return 0;
 		}
 	}
 

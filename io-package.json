@@ -266,9 +266,6 @@
         "authors": [
             "DutchmanNL <rdrozda86@gmail.com>"
         ],
-        "contributors": [
-            "xXBJXx"
-        ],
         "keywords": [
             "energy",
             "power",
@@ -290,6 +287,7 @@
         "loglevel": "info",
         "mode": "daemon",
         "type": "energy",
+        "tier": 3,
         "compact": true,
         "connectionType": "local",
         "dataSource": "push",
@@ -304,12 +302,12 @@
         "supportCustoms": true,
         "globalDependencies": [
             {
-                "admin": ">=6.17.14"
+                "admin": ">=7.6.17"
             }
         ],
         "dependencies": [
             {
-                "js-controller": ">=5.0.19"
+                "js-controller": ">=6.0.11"
             }
         ]
     },

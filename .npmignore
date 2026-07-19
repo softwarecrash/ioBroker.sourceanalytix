@@ -9,6 +9,7 @@ gulpfile.js
 .github
 .gitignore
 .npmignore
+.mocharc.json
 iob_npm.done
 main.test.js
 
@@ -32,6 +33,7 @@ launch.json
 # npm package files
 iobroker.*.tgz
 package-lock.json
+CHANGELOG_OLD.md
 
 # maintenance scripts
 maintenance/**

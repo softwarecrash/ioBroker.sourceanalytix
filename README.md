@@ -176,7 +176,9 @@ removing or modifying these objects in the state raw object
 ### Price-Definitions
 ![Main Settings](admin/readmeDocu/priceSettings.png)
 
-Price definitions can use a fixed price or a dynamic price state. Use `static` in `Price source` to keep the existing `Price p/unit` behavior. Use `state` and enter the full ioBroker state ID in `Price state` when the current unit price is provided by another adapter, for example a dynamic electricity tariff. The value in that state must match the configured unit, e.g. EUR/kWh for `kWh`.
+Price definitions can use a fixed price or a dynamic price state. Use `static` in `Price source` to keep the existing `Price p/unit` behavior. Use `state` and enter the full ioBroker state ID in `Price state` when the unit price is provided by another adapter, for example a dynamic electricity tariff. The value in that state must match the configured unit, e.g. EUR/kWh for `kWh`.
+
+Dynamic prices are stored as a timestamped price history. A price state change only applies to consumption values from that timestamp onward; already calculated costs are not recalculated when the current price changes. For each consumption event SourceAnalytix uses the price that was valid at the consumption state's timestamp. If a cumulative meter delta spans multiple price intervals, SourceAnalytix splits the delta proportionally over the elapsed time between the two readings.
 
 **Issue 8** current value **<** previousInit<br/>
 A device reset is detected, see function 7
@@ -207,9 +209,9 @@ A device reset is detected, see function 7
 <!--
 **Issue 6** Setting - Cannot deactivate state for SourceAnalytix
 
-Im RAW NUR "consumption":false umgestellt, gespeichert. Das wurde behalten (wo ggf. noch nicht false, auch bei "enabled": false und bei "costs": false )
-In der Objekt-Übersicht ist der Schraubenschlüssel nachwievor blau. Dann mit dem Schraubenschlüssel in das Objekt, SA war nicht der Haken bei aktiviert drin. Dort einmal auf aktiviert, nicht speichern, wieder auf deaktiviert, speichern.
-Kontrolle im RAW, ob SA-EIntrag nun weg => jup, is nun fott
+Only changed "consumption": false in the raw object and saved it. This value was kept, where applicable also for "enabled": false and "costs": false.
+The wrench in the object overview is still blue. Open the object via the wrench, enable SourceAnalytix once, do not save, disable it again, then save.
+Check in the raw object whether the SourceAnalytix entry is gone.
 -->
 
 <!--

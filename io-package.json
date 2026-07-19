@@ -320,7 +320,9 @@
                 "des": "Electricity consumption Day price",
                 "costType": "costs",
                 "unitType": "kWh",
+                "priceSource": "static",
                 "uPpU": "0.27",
+                "priceState": "",
                 "uPpM": "15"
             },
             {
@@ -328,7 +330,9 @@
                 "des": "Electricity Delivery Earnings",
                 "costType": "earnings",
                 "unitType": "kWh",
+                "priceSource": "static",
                 "uPpU": "0.17",
+                "priceState": "",
                 "uPpM": "15"
             },
             {
@@ -336,7 +340,9 @@
                 "des": "Electricity consumption Night price",
                 "costType": "costs",
                 "unitType": "kWh",
+                "priceSource": "static",
                 "uPpU": "0.24",
+                "priceState": "",
                 "uPpM": "15"
             },
             {
@@ -344,7 +350,9 @@
                 "des": "Heatpomp costs by unit",
                 "costType": "costs",
                 "unitType": "kWh",
+                "priceSource": "static",
                 "uPpU": "0.24",
+                "priceState": "",
                 "uPpM": "31"
             },
             {
@@ -352,7 +360,9 @@
                 "des": "Gas costs by unit",
                 "costType": "costs",
                 "unitType": "m³",
+                "priceSource": "static",
                 "uPpU": "0.12",
+                "priceState": "",
                 "uPpM": "31"
             },
             {
@@ -360,7 +370,9 @@
                 "des": "Oil costs by unit",
                 "costType": "costs",
                 "unitType": "m³",
+                "priceSource": "static",
                 "uPpU": "0.12",
+                "priceState": "",
                 "uPpM": "7.38"
             },
             {
@@ -368,7 +380,9 @@
                 "des": "Water costs by unit",
                 "costType": "costs",
                 "unitType": "m³",
+                "priceSource": "static",
                 "uPpU": "0.07",
+                "priceState": "",
                 "uPpM": "22"
             }
         ],

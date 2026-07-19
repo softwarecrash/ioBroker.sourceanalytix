@@ -51,6 +51,7 @@ class Sourceanalytix extends utils.Adapter {
 			pricesConfig: {}
 		};
 		this.activeStates = {}; // Array of activated states for SourceAnalytix
+		this.dynamicPriceStates = {}; // Dynamic price state ID -> price definition categories
 		this.validStates = {}; // Array of all created states
 		this.visWidgetJson ={}; // Array containing all calculation values to use in vis widget
 	}
@@ -181,6 +182,21 @@ class Sourceanalytix extends utils.Adapter {
 
 	}
 
+	/**
+     * Convert configured or state-provided prices to numbers.
+     * @param {any} value - Price value from settings or ioBroker state
+     * @returns {number | null}
+     */
+	parsePriceValue(value) {
+		if (value === null || value === undefined || value === '') return null;
+		if (typeof value === 'number') return Number.isFinite(value) ? value : null;
+		if (typeof value === 'string') {
+			const parsedValue = Number(value.trim().replace(',', '.'));
+			return Number.isFinite(parsedValue) ? parsedValue : null;
+		}
+		return null;
+	}
+
 	//ToDo 0.5: Implement cleanup for unused states
 	// async cleanupUnused() {
 	//     const allStates = await this.getAdapterObjectsAsync()
@@ -218,17 +234,48 @@ class Sourceanalytix extends utils.Adapter {
 			}
 
 			// Load price definition from admin configuration
-			const pricesConfig = this.config.pricesDefinition;
+			const pricesConfig = this.config.pricesDefinition || [];
 			const priceStore = this.unitPriceDef.pricesConfig;
+			this.dynamicPriceStates = {};
 
 			for (const priceDef in pricesConfig) {
-				priceStore[pricesConfig[priceDef].cat] = {
-					cat: pricesConfig[priceDef].cat,
-					uDes: pricesConfig[priceDef].cat,
-					uPpU: pricesConfig[priceDef].uPpU,
-					uPpM: pricesConfig[priceDef].uPpM,
-					costType: pricesConfig[priceDef].costType,
-					unitType: pricesConfig[priceDef].unitType,
+				const priceConfig = pricesConfig[priceDef];
+				const priceSource = priceConfig.priceSource === 'state' ? 'state' : 'static';
+				const priceState = priceSource === 'state' && typeof priceConfig.priceState === 'string' ? priceConfig.priceState.trim() : '';
+				const configuredUnitPrice = this.parsePriceValue(priceConfig.uPpU);
+				const configuredBasicPrice = this.parsePriceValue(priceConfig.uPpM);
+				let unitPrice = configuredUnitPrice === null ? priceConfig.uPpU : configuredUnitPrice;
+
+				if (priceSource === 'state') {
+					if (priceState) {
+						if (!this.dynamicPriceStates[priceState]) {
+							this.dynamicPriceStates[priceState] = [];
+						}
+						this.dynamicPriceStates[priceState].push(priceConfig.cat);
+						this.subscribeForeignStates(priceState);
+
+						const priceStateValue = await this.getForeignStateAsync(priceState);
+						const dynamicUnitPrice = priceStateValue ? this.parsePriceValue(priceStateValue.val) : null;
+						if (dynamicUnitPrice !== null) {
+							unitPrice = dynamicUnitPrice;
+							this.log.info(`Loaded dynamic unit price ${unitPrice} for ${priceConfig.cat} from ${priceState}`);
+						} else {
+							this.log.warn(`Dynamic price state ${priceState} for ${priceConfig.cat} has no valid numeric value, using configured fallback price ${priceConfig.uPpU}`);
+						}
+					} else {
+						this.log.warn(`Price definition ${priceConfig.cat} uses dynamic price source but no state ID is configured, using configured fallback price ${priceConfig.uPpU}`);
+					}
+				}
+
+				priceStore[priceConfig.cat] = {
+					cat: priceConfig.cat,
+					uDes: priceConfig.cat,
+					uPpU: unitPrice,
+					uPpM: configuredBasicPrice === null ? priceConfig.uPpM : configuredBasicPrice,
+					costType: priceConfig.costType,
+					unitType: priceConfig.unitType,
+					priceSource: priceSource,
+					priceState: priceState,
 				};
 			}
 
@@ -590,11 +637,142 @@ class Sourceanalytix extends utils.Adapter {
 	}
 
 	/**
+     * Handle updates from dynamic price states and recalculate matching cost states.
+     * @param {string} priceStateID - ioBroker state ID of the dynamic price source
+     * @param {ioBroker.State} state - New price state value
+     */
+	async handleDynamicPriceChange(priceStateID, state) {
+		try {
+			const unitPrice = this.parsePriceValue(state.val);
+			if (unitPrice === null) {
+				this.log.warn(`Dynamic price state ${priceStateID} changed but value ${JSON.stringify(state.val)} is not numeric, keeping previous price`);
+				return;
+			}
+
+			for (const priceDefinition of this.dynamicPriceStates[priceStateID]) {
+				const priceConfig = this.unitPriceDef.pricesConfig[priceDefinition];
+				if (!priceConfig) {
+					this.log.warn(`Dynamic price update for ${priceDefinition} ignored because the price definition is not loaded`);
+					continue;
+				}
+
+				const previousPrice = priceConfig.uPpU;
+				priceConfig.uPpU = unitPrice;
+				this.log.info(`Dynamic unit price for ${priceDefinition} changed from ${previousPrice} to ${unitPrice}`);
+
+				for (const stateID in this.activeStates) {
+					const activeState = this.activeStates[stateID];
+					if (activeState && activeState.stateDetails && activeState.stateDetails.stateType === priceDefinition) {
+						activeState.prices.unitPrice = unitPrice;
+						await this.recalculateCostsForState(stateID, `dynamic price update from ${priceStateID}`);
+					}
+				}
+			}
+		} catch (error) {
+			this.errorHandling(`[handleDynamicPriceChange] ${priceStateID}`, error);
+		}
+	}
+
+	/**
+     * Recalculate only financial states from the stored cumulative reading.
+     * @param {string} stateID - Source state ID
+     * @param {string} reason - Log context
+     */
+	async recalculateCostsForState(stateID, reason) {
+		try {
+			if (!this.activeStates[stateID] || !this.activeStates[stateID].stateDetails || !this.activeStates[stateID].calcValues) return;
+
+			const calcValues = this.activeStates[stateID].calcValues;
+			const stateDetails = this.activeStates[stateID].stateDetails;
+			const statePrices = this.activeStates[stateID].prices;
+			const reading = calcValues.cumulativeValue;
+
+			if (!stateDetails.costs) return;
+			if (reading === null || reading === undefined) {
+				this.log.warn(`[recalculateCostsForState] Cannot recalculate costs for ${stateID}, cumulative reading is not available`);
+				return;
+			}
+
+			const unitPrice = this.parsePriceValue(statePrices.unitPrice);
+			if (unitPrice === null) {
+				this.log.warn(`[recalculateCostsForState] Cannot recalculate costs for ${stateID}, unit price ${JSON.stringify(statePrices.unitPrice)} is not numeric`);
+				return;
+			}
+
+			const date = new Date();
+			let stateName = `${this.namespace}.${stateDetails.deviceName}.currentYear.${stateDetails.financialCategory}`;
+			const calculationRounded = {
+				priceDay: await this.roundCosts(unitPrice * (reading - calcValues.start_day)),
+				priceWeek: await this.roundCosts(unitPrice * (reading - calcValues.start_week)),
+				priceMonth: await this.roundCosts(unitPrice * (reading - calcValues.start_month)),
+				priceQuarter: await this.roundCosts(unitPrice * (reading - calcValues.start_quarter)),
+				priceYear: await this.roundCosts(unitPrice * (reading - calcValues.start_year)),
+			};
+
+			await this.setStateChangedAsync(`${stateName}.01_currentDay`, {
+				val: calculationRounded.priceDay,
+				ack: true
+			});
+			await this.setStateChangedAsync(`${stateName}.02_currentWeek`, {
+				val: calculationRounded.priceWeek,
+				ack: true
+			});
+			await this.setStateChangedAsync(`${stateName}.03_currentMonth`, {
+				val: calculationRounded.priceMonth,
+				ack: true
+			});
+			await this.setStateChangedAsync(`${stateName}.04_currentQuarter`, {
+				val: calculationRounded.priceQuarter,
+				ack: true
+			});
+			await this.setStateChangedAsync(`${stateName}.05_currentYear`, {
+				val: calculationRounded.priceYear,
+				ack: true
+			});
+
+			if (this.config.store_weeks || this.config.store_months || this.config.store_quarters) {
+				await this.setStateChangedAsync(`${this.namespace}.${stateDetails.deviceName}.${actualDate.year}.${stateDetails.financialCategory}Cumulative`, {
+					val: calculationRounded.priceYear,
+					ack: true
+				});
+			}
+
+			await this.setStateChangedAsync(`${stateName}.currentWeek.${weekdays[date.getDay()]}`, {
+				val: calculationRounded.priceDay,
+				ack: true
+			});
+
+			stateName = `${this.namespace}.${stateDetails.deviceName}.${actualDate.year}.${stateDetails.financialCategory}`;
+			if (storeSettings.storeWeeks) await this.setStateChangedAsync(`${stateName}.weeks.${actualDate.week}`, {
+				val: calculationRounded.priceWeek,
+				ack: true
+			});
+			if (storeSettings.storeMonths) await this.setStateChangedAsync(`${stateName}.months.${actualDate.month}`, {
+				val: calculationRounded.priceMonth,
+				ack: true
+			});
+			if (storeSettings.storeQuarters) await this.setStateChangedAsync(`${stateName}.quarters.Q${actualDate.quarter}`, {
+				val: calculationRounded.priceQuarter,
+				ack: true
+			});
+
+			previousCalculationRounded[stateID] = {
+				...previousCalculationRounded[stateID],
+				...calculationRounded
+			};
+
+			this.log.debug(`[recalculateCostsForState] Costs recalculated for ${stateID} because of ${reason}: ${JSON.stringify(calculationRounded)}`);
+		} catch (error) {
+			this.errorHandling(`[recalculateCostsForState] ${stateID}`, error);
+		}
+	}
+
+	/**
      * Is called if a subscribed state changes
      * @param {string} id of state
      * @param {ioBroker.State | null | undefined} state
-     */
-	onStateChange(id, state) {
+	 */
+	async onStateChange(id, state) {
 		if (calcBlock) return; // cancel operation if global calculation block is activate
 		try {
 			// Check if a valid state change has been received
@@ -607,11 +785,16 @@ class Sourceanalytix extends utils.Adapter {
 				// 10-01-2021 : disable IF check for new value to analyse if this solves 0 watt calc bug
 				// 11-01-2021 : removing if successfully result, but need to check debounce !
 
+				const isDynamicPriceState = !!this.dynamicPriceStates[id];
+				if (isDynamicPriceState) {
+					await this.handleDynamicPriceChange(id, state);
+				}
+
 				// Handle calculation for state
 				// Check if for some reason calculation handler ist called for an object not initialised
 				if (this.activeStates[id]){
-					this.calculationHandler(id, state);
-				} else {
+					await this.calculationHandler(id, state);
+				} else if (!isDynamicPriceState) {
 					this.log.debug(`[onStateChange] state not initialised, calculation cancelled]`);
 				}
 

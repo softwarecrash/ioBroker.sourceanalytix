@@ -176,6 +176,8 @@ removing or modifying these objects in the state raw object
 ### Price-Definitions
 ![Main Settings](admin/readmeDocu/priceSettings.png)
 
+Price definitions can use a fixed price or a dynamic price state. Use `static` in `Price source` to keep the existing `Price p/unit` behavior. Use `state` and enter the full ioBroker state ID in `Price state` when the current unit price is provided by another adapter, for example a dynamic electricity tariff. The value in that state must match the configured unit, e.g. EUR/kWh for `kWh`.
+
 **Issue 8** current value **<** previousInit<br/>
 A device reset is detected, see function 7
 

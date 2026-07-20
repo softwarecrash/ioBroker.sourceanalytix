@@ -51,8 +51,9 @@ class Sourceanalytix extends utils.Adapter {
 			pricesConfig: {}
 		};
 		this.activeStates = {}; // Array of activated states for SourceAnalytix
-		this.dynamicPriceStates = {}; // Dynamic price state ID -> price definition categories
-		this.priceHistories = {}; // Price definition category -> ordered dynamic price history
+		this.dynamicPriceStates = {}; // Price source state ID -> price definition categories
+		this.priceControlStates = {}; // Writable local price state ID -> price definition category
+		this.priceHistories = {}; // Price definition category -> ordered price history
 		this.validStates = {}; // Array of all created states
 		this.visWidgetJson ={}; // Array containing all calculation values to use in vis widget
 	}
@@ -232,6 +233,15 @@ class Sourceanalytix extends utils.Adapter {
 	}
 
 	/**
+	 * @param {string} stateID - Source state ID
+	 * @returns {boolean} Whether costs must be accumulated against historical prices
+	 */
+	usesHistoricalCostCalculation(stateID) {
+		const activeState = this.activeStates[stateID];
+		return !!(activeState && activeState.stateDetails && activeState.stateDetails.costs && activeState.prices);
+	}
+
+	/**
 	 * @param {number | string | null | undefined} timestamp - ioBroker timestamp
 	 * @returns {number} Valid timestamp or the current time
 	 */
@@ -254,6 +264,93 @@ class Sourceanalytix extends utils.Adapter {
 	 */
 	getPriceHistoryStateName(priceDefinition) {
 		return `priceHistory.${priceDefinition.toString().replace(/[^a-zA-Z0-9_-]/g, '_')}`;
+	}
+
+	/**
+	 * @param {string} priceDefinition - Price definition category
+	 * @returns {string} Local writable state ID
+	 */
+	getPriceControlStateName(priceDefinition) {
+		return `priceDefinitions.${priceDefinition.toString().replace(/[^a-zA-Z0-9_-]/g, '_')}.currentPrice`;
+	}
+
+	/**
+	 * @param {string} priceDefinition - Price definition category
+	 * @returns {string} State which remembers the last processed admin price
+	 */
+	getConfiguredPriceStateName(priceDefinition) {
+		return `priceDefinitions.${priceDefinition.toString().replace(/[^a-zA-Z0-9_-]/g, '_')}.configuredPrice`;
+	}
+
+	/**
+	 * Store a fixed price only when the admin setting actually changed.
+	 * @param {string} priceDefinition - Price definition category
+	 * @param {number} configuredPrice - Price from adapter settings
+	 * @param {unknown} validFrom - Optional effective date
+	 */
+	async storeConfiguredPrice(priceDefinition, configuredPrice, validFrom) {
+		const stateName = this.getConfiguredPriceStateName(priceDefinition);
+		await this.extendObjectAsync(stateName, {
+			type: 'state',
+			common: {
+				name: `Configured price ${priceDefinition}`,
+				type: 'number',
+				role: 'value.price',
+				read: true,
+				write: false,
+			},
+			native: {priceDefinition},
+		});
+		const storedConfigState = await this.getStateAsync(stateName);
+		const storedConfigPrice = storedConfigState ? this.parsePriceValue(storedConfigState.val) : null;
+		if (storedConfigPrice !== configuredPrice || (validFrom !== null && validFrom !== undefined && validFrom !== '')) {
+			const priceTimestamp = dynamicPricing.parseValidityTimestamp(validFrom, Date.now());
+			await this.storeDynamicPriceHistory(priceDefinition, configuredPrice, priceTimestamp);
+		}
+		await this.setStateChangedAsync(stateName, {val: configuredPrice, ack: true});
+	}
+
+	/**
+	 * Create and publish the current unit price for scripts and VIS.
+	 * @param {string} priceDefinition - Price definition category
+	 * @param {number} unitPrice - Current unit price
+	 * @param {string} unit - Consumption unit
+	 */
+	async ensurePriceControlState(priceDefinition, unitPrice, unit) {
+		const stateName = this.getPriceControlStateName(priceDefinition);
+		await this.extendObjectAsync(stateName, {
+			type: 'state',
+			common: {
+				name: `Current price ${priceDefinition}`,
+				type: 'number',
+				role: 'value.price',
+				read: true,
+				write: true,
+				unit: `${useCurrency}/${unit}`,
+			},
+			native: {priceDefinition},
+		});
+		this.priceControlStates[`${this.namespace}.${stateName}`] = priceDefinition;
+		this.subscribeStates(stateName);
+		await this.setStateChangedAsync(stateName, {val: unitPrice, ack: true});
+	}
+
+	/**
+	 * Update the active price definition and all states which use it.
+	 * @param {string} priceDefinition - Price definition category
+	 * @param {number} unitPrice - New unit price
+	 */
+	async applyCurrentPrice(priceDefinition, unitPrice) {
+		const priceConfig = this.unitPriceDef.pricesConfig[priceDefinition];
+		if (!priceConfig) return;
+		priceConfig.uPpU = unitPrice;
+		for (const stateID in this.activeStates) {
+			const activeState = this.activeStates[stateID];
+			if (activeState && activeState.stateDetails && activeState.stateDetails.stateType === priceDefinition) {
+				activeState.prices.unitPrice = unitPrice;
+			}
+		}
+		await this.setStateChangedAsync(this.getPriceControlStateName(priceDefinition), {val: unitPrice, ack: true});
 	}
 
 	/**
@@ -350,7 +447,7 @@ class Sourceanalytix extends utils.Adapter {
 		history.push({ts: priceTimestamp, price: priceNumber});
 		this.priceHistories[priceDefinition] = this.normalizePriceHistory(history);
 		await this.persistPriceHistory(priceDefinition);
-		this.log.info(`Stored dynamic price ${priceNumber} for ${priceDefinition} at ${new Date(priceTimestamp).toISOString()}`);
+		this.log.info(`Stored unit price ${priceNumber} for ${priceDefinition} at ${new Date(priceTimestamp).toISOString()}`);
 		return true;
 	}
 
@@ -521,7 +618,7 @@ class Sourceanalytix extends utils.Adapter {
 	 * @returns {Promise<object | null>} Dynamic cost memory, or null for unsupported states
 	 */
 	async ensureDynamicCostMemory(stateID, reading, timestamp) {
-		if (!this.isDynamicPriceState(stateID)) return null;
+		if (!this.usesHistoricalCostCalculation(stateID)) return null;
 		if (!this.activeStates[stateID] || !this.activeStates[stateID].stateDetails || !this.activeStates[stateID].calcValues) return null;
 
 		const readingNumber = this.parsePriceValue(reading);
@@ -636,7 +733,7 @@ class Sourceanalytix extends utils.Adapter {
 	 * @param {object} beforeReset - Date information before reset
 	 */
 	async resetDynamicCostMemory(stateID, reading, beforeReset) {
-		if (!this.isDynamicPriceState(stateID)) return;
+		if (!this.usesHistoricalCostCalculation(stateID)) return;
 
 		const activeState = this.activeStates[stateID];
 		const readingNumber = this.parsePriceValue(reading);
@@ -799,17 +896,22 @@ class Sourceanalytix extends utils.Adapter {
 			const pricesConfig = this.config.pricesDefinition || [];
 			const priceStore = this.unitPriceDef.pricesConfig;
 			this.dynamicPriceStates = {};
+			this.priceControlStates = {};
 
 			for (const priceDef in pricesConfig) {
 				const priceConfig = pricesConfig[priceDef];
-				const priceSource = priceConfig.priceSource === 'state' ? 'state' : 'static';
-				const priceState = priceSource === 'state' && typeof priceConfig.priceState === 'string' ? priceConfig.priceState.trim() : '';
+				const priceSource = ['state', 'selector'].includes(priceConfig.priceSource) ? priceConfig.priceSource : 'static';
+				const priceState = priceSource !== 'static' && typeof priceConfig.priceState === 'string' ? priceConfig.priceState.trim() : '';
 				const configuredUnitPrice = this.parsePriceValue(priceConfig.uPpU);
+				const alternatePrice = this.parsePriceValue(priceConfig.alternatePrice);
 				const configuredBasicPrice = this.parsePriceValue(priceConfig.uPpM);
 				let unitPrice = configuredUnitPrice;
 
-				if (priceSource === 'state') {
-					await this.ensurePriceHistoryState(priceConfig.cat);
+				await this.ensurePriceHistoryState(priceConfig.cat);
+				if (priceSource === 'static' && configuredUnitPrice !== null) {
+					await this.storeConfiguredPrice(priceConfig.cat, configuredUnitPrice, priceConfig.validFrom);
+					unitPrice = await this.getDynamicPriceForTimestamp(priceConfig.cat, Date.now(), configuredUnitPrice);
+				} else if (priceSource !== 'static') {
 					if (priceState) {
 						if (!this.dynamicPriceStates[priceState]) {
 							this.dynamicPriceStates[priceState] = [];
@@ -818,16 +920,21 @@ class Sourceanalytix extends utils.Adapter {
 						this.subscribeForeignStates(priceState);
 
 						const priceStateValue = await this.getForeignStateAsync(priceState);
-						const dynamicUnitPrice = priceStateValue ? this.parsePriceValue(priceStateValue.val) : null;
+						const dynamicUnitPrice = priceStateValue
+							? (priceSource === 'selector'
+								? dynamicPricing.getSelectorPrice(priceStateValue.val, configuredUnitPrice, alternatePrice, priceConfig.selectorValue)
+								: this.parsePriceValue(priceStateValue.val))
+							: null;
 						if (dynamicUnitPrice !== null) {
 							unitPrice = dynamicUnitPrice;
-							await this.storeDynamicPriceHistory(priceConfig.cat, dynamicUnitPrice, this.getStateChangeTimestamp(priceStateValue));
-							this.log.info(`Loaded dynamic unit price ${unitPrice} for ${priceConfig.cat} from ${priceState}`);
+							const sourceTimestamp = priceSource === 'selector' ? Date.now() : this.getStateChangeTimestamp(priceStateValue);
+							await this.storeDynamicPriceHistory(priceConfig.cat, dynamicUnitPrice, sourceTimestamp);
+							this.log.info(`Loaded unit price ${unitPrice} for ${priceConfig.cat} from ${priceState}`);
 						} else {
-							this.log.warn(`Dynamic price state ${priceState} for ${priceConfig.cat} has no valid numeric value, using configured fallback price ${priceConfig.uPpU}`);
+							this.log.warn(`Price source state ${priceState} for ${priceConfig.cat} has no valid value or tariff, using configured fallback price ${priceConfig.uPpU}`);
 						}
 					} else {
-						this.log.warn(`Price definition ${priceConfig.cat} uses dynamic price source but no state ID is configured, using configured fallback price ${priceConfig.uPpU}`);
+						this.log.warn(`Price definition ${priceConfig.cat} uses a state price source but no state ID is configured, using configured fallback price ${priceConfig.uPpU}`);
 					}
 				}
 
@@ -840,12 +947,17 @@ class Sourceanalytix extends utils.Adapter {
 					cat: priceConfig.cat,
 					uDes: priceConfig.cat,
 					uPpU: unitPrice,
+					basePrice: configuredUnitPrice,
 					uPpM: configuredBasicPrice === null ? priceConfig.uPpM : configuredBasicPrice,
 					costType: priceConfig.costType,
 					unitType: priceConfig.unitType,
 					priceSource: priceSource,
 					priceState: priceState,
+					alternatePrice: alternatePrice,
+					selectorValue: priceConfig.selectorValue,
+					validFrom: priceConfig.validFrom,
 				};
+				await this.ensurePriceControlState(priceConfig.cat, unitPrice, priceConfig.unitType);
 			}
 
 			console.debug(`All Unit category's ${JSON.stringify(this.unitPriceDef)}`);
@@ -1170,8 +1282,11 @@ class Sourceanalytix extends utils.Adapter {
 					this.unsubscribeForeignStates(stateID);
 				}
 
-			} else {
-				// Object change not related to this adapter, ignoring
+			} else if (this.activeStates[stateID]) {
+				delete this.activeStates[stateID];
+				delete previousCalculationRounded[stateID];
+				this.unsubscribeForeignStates(stateID);
+				this.log.info(`Source state ${stateID} was deleted; SourceAnalytix disabled it while retaining calculated history`);
 			}
 		} catch (error) {
 			// Send code failure to sentry
@@ -1180,18 +1295,12 @@ class Sourceanalytix extends utils.Adapter {
 	}
 
 	/**
-	 * Handle updates from dynamic price states and recalculate matching cost states.
+	 * Handle updates from numeric price states and tariff selectors.
 	 * @param {string} priceStateID - ioBroker state ID of the dynamic price source
 	 * @param {ioBroker.State} state - New price state value
 	 */
 	async handleDynamicPriceChange(priceStateID, state) {
 		try {
-			const unitPrice = this.parsePriceValue(state.val);
-			if (unitPrice === null) {
-				this.log.warn(`Dynamic price state ${priceStateID} changed but value ${JSON.stringify(state.val)} is not numeric, keeping previous price`);
-				return;
-			}
-
 			for (const priceDefinition of this.dynamicPriceStates[priceStateID]) {
 				const priceConfig = this.unitPriceDef.pricesConfig[priceDefinition];
 				if (!priceConfig) {
@@ -1199,21 +1308,39 @@ class Sourceanalytix extends utils.Adapter {
 					continue;
 				}
 
+				const unitPrice = priceConfig.priceSource === 'selector'
+					? dynamicPricing.getSelectorPrice(state.val, priceConfig.basePrice, priceConfig.alternatePrice, priceConfig.selectorValue)
+					: this.parsePriceValue(state.val);
+				if (unitPrice === null) {
+					this.log.warn(`Price source state ${priceStateID} changed but value ${JSON.stringify(state.val)} cannot select a valid price, keeping previous price`);
+					continue;
+				}
+
 				const previousPrice = priceConfig.uPpU;
 				await this.storeDynamicPriceHistory(priceDefinition, unitPrice, this.getStateChangeTimestamp(state));
-				priceConfig.uPpU = unitPrice;
-				this.log.info(`Dynamic unit price for ${priceDefinition} changed from ${previousPrice} to ${unitPrice}`);
-
-				for (const stateID in this.activeStates) {
-					const activeState = this.activeStates[stateID];
-					if (activeState && activeState.stateDetails && activeState.stateDetails.stateType === priceDefinition) {
-						activeState.prices.unitPrice = unitPrice;
-					}
-				}
+				await this.applyCurrentPrice(priceDefinition, unitPrice);
+				this.log.info(`Unit price for ${priceDefinition} changed from ${previousPrice} to ${unitPrice}`);
 			}
 		} catch (error) {
 			this.errorHandling(`[handleDynamicPriceChange] ${priceStateID}`, error);
 		}
+	}
+
+	/**
+	 * Apply an immediate price entered through the writable adapter state.
+	 * @param {string} id - Full local price state ID
+	 * @param {ioBroker.State} state - User-written state
+	 */
+	async handleWritablePriceChange(id, state) {
+		const priceDefinition = this.priceControlStates[id];
+		const unitPrice = this.parsePriceValue(state.val);
+		if (!priceDefinition || unitPrice === null) {
+			this.log.warn(`Writable price state ${id} received invalid value ${JSON.stringify(state.val)}`);
+			return;
+		}
+		await this.storeDynamicPriceHistory(priceDefinition, unitPrice, this.getStateChangeTimestamp(state));
+		await this.applyCurrentPrice(priceDefinition, unitPrice);
+		this.log.info(`Unit price for ${priceDefinition} was set to ${unitPrice} through ${id}`);
 	}
 
 	/**
@@ -1231,8 +1358,8 @@ class Sourceanalytix extends utils.Adapter {
 			const reading = calcValues.cumulativeValue;
 
 			if (!stateDetails.costs) return;
-			if (this.isDynamicPriceState(stateID)) {
-				this.log.debug(`[recalculateCostsForState] Skipped dynamic cost recalculation for ${stateID} because dynamic prices are historical`);
+			if (this.usesHistoricalCostCalculation(stateID)) {
+				this.log.debug(`[recalculateCostsForState] Skipped cost recalculation for ${stateID} because unit prices are historical`);
 				return;
 			}
 			if (reading === null || reading === undefined) {
@@ -1278,6 +1405,10 @@ class Sourceanalytix extends utils.Adapter {
 		try {
 			// Check if a valid state change has been received
 			if (state) {
+				if (this.priceControlStates[id]) {
+					if (!state.ack) await this.handleWritablePriceChange(id, state);
+					return;
+				}
 				// The state was changed
 				this.log.debug(`state ${id} changed : ${JSON.stringify(state)} SourceAnalytix calculation executed`);
 
@@ -1389,7 +1520,7 @@ class Sourceanalytix extends utils.Adapter {
 
 		if (stateDetails.costs) {
 			let variableCosts;
-			if (this.isDynamicPriceState(stateID)) {
+			if (this.usesHistoricalCostCalculation(stateID)) {
 				variableCosts = activeState.dynamicCosts ? activeState.dynamicCosts.totals : {};
 			} else {
 				const unitPrice = this.getNumberOrDefault(activeState.prices.unitPrice, 0);
@@ -1782,75 +1913,40 @@ class Sourceanalytix extends utils.Adapter {
 
 			this.log.debug(`[calculationHandler] reading value ${reading} after exponent multiplier : ${JSON.stringify(targetExponent)}`);
 
-			// Check if state was already initiated
-			// Function to initiate proper memory values at device init and value reset
-			const initiateState = async () => {
-				// Prepare object array for extension
-				const obj = {};
-				obj.common = {};
-				obj.common.custom = {};
-				obj.common.custom[this.namespace] = {};
-
-				// Determine previous reset value
-				// If null (first init) set 0 to valueAtDeviceReset otherwise copy current value
-				if (calcValues.valueAtDeviceReset == null){
-					// Update memory value with valueAtDeviceReset 0 and current reading at init
-					obj.common.custom[this.namespace].valueAtDeviceReset = 0;
-					obj.common.custom[this.namespace].valueAtDeviceInit = reading;
-				} else  {
-					// Update memory value with  known valueAtDeviceReset and current reading at init
-					obj.common.custom[this.namespace].valueAtDeviceReset = calcValues.cumulativeValue;
-					obj.common.custom[this.namespace].valueAtDeviceInit = reading;
-				}
-
-				// Update memory value with current & init value at object and memo
-				this.log.debug(`[calculationHandler] Extend object with  ${JSON.stringify(obj)} `);
-				await this.extendForeignObject(stateID, obj);
-			};
-
-			if (calcValues.valueAtDeviceReset !== null && currentCath !== 'Watt') {
-				const readingWithResetOffset = reading + this.getNumberOrDefault(calcValues.valueAtDeviceReset, 0);
-				const readingClassification = calculation.classifyCumulativeReading(
-					readingWithResetOffset,
-					this.getNumberOrDefault(calcValues.cumulativeValue, readingWithResetOffset),
-					stateDetails.deviceResetLogicEnabled,
-					this.getNumberOrDefault(stateDetails.threshold, 0),
-				);
-				if (readingClassification.type === 'jitter') {
-					this.log.debug(`[calculationHandler] Ignoring cumulative reading jitter of ${readingClassification.decrease} for ${stateID}`);
-					return;
-				}
-			}
-
-			// Verify if state is initiated for the first time, if not handle initialisation
-			if (calcValues.valueAtDeviceReset == null && currentCath !== 'Watt'){
-				this.log.info(`Initiating ${stateID} for the first time in SourceAnalytix`);
-				await initiateState();
-
-			// State was already initiated, current value >= known cumulative process normally
-			} else if (((reading + calcValues.valueAtDeviceReset) >= calcValues.cumulativeValue) && currentCath !== 'Watt') {
-				this.log.debug(`[calculationHandler] New reading ${reading} bigger than stored value ${calcValues.valueAtDeviceInit} processing normally`);
-				this.log.debug(`[calculationHandler] Adding ${reading} to stored value ${this.activeStates[stateID].calcValues.valueAtDeviceReset}`);
-
-				// Add current reading to value in memory
-				reading = reading + this.activeStates[stateID].calcValues.valueAtDeviceReset;
-
-				this.log.debug(`[calculationHandler] Calculation outcome ${reading} valueAtDeviceReset ${this.activeStates[stateID].calcValues.valueAtDeviceReset}`);
-
-			// State was already initiated, current value < known cumulative process normally
-			} else if (((reading + calcValues.valueAtDeviceReset) < calcValues.cumulativeValue) && currentCath !== 'Watt') {
-
-				// Only handle device reset if activated (default = TRUE) & reading + threshold value < cumulativeValue
-				if (stateDetails.deviceResetLogicEnabled && ((reading + calcValues.valueAtDeviceReset + stateDetails.threshold) < calcValues.cumulativeValue) ){
-					this.log.warn(`Device reset detected for ${stateID} store current cumulatedReading ${calcValues.cumulativeValue} as valueAtDeviceReset (previous valueAtDeviceReset : ${calcValues.valueAtDeviceReset})`);
-					await initiateState();
+			if (currentCath !== 'Watt') {
+				if (calcValues.valueAtDeviceReset == null) {
+					this.log.info(`Initiating ${stateID} for the first time in SourceAnalytix`);
+					calcValues.valueAtDeviceReset = 0;
+					calcValues.valueAtDeviceInit = reading;
+					await this.extendForeignObject(stateID, {common: {custom: {[this.namespace]: {
+						valueAtDeviceReset: 0,
+						valueAtDeviceInit: reading,
+					}}}});
 				} else {
-					this.log.info(`Device reset detected for ${stateID}, feature disabled processing normally)`);
+					const resolvedReading = calculation.resolveCumulativeReading(
+						reading,
+						this.getNumberOrDefault(calcValues.valueAtDeviceReset, 0),
+						this.getNumberOrDefault(calcValues.cumulativeValue, reading),
+						stateDetails.deviceResetLogicEnabled,
+						this.getNumberOrDefault(stateDetails.threshold, 0),
+					);
+					if (resolvedReading.type === 'jitter') {
+						this.log.debug(`[calculationHandler] Ignoring cumulative reading jitter of ${resolvedReading.decrease} for ${stateID}`);
+						return;
+					}
+					if (resolvedReading.type === 'reset') {
+						this.log.warn(`Device reset detected for ${stateID}; preserving cumulative value ${resolvedReading.reading} with new offset ${resolvedReading.resetOffset}`);
+						calcValues.valueAtDeviceReset = resolvedReading.resetOffset;
+						calcValues.valueAtDeviceInit = reading;
+						await this.extendForeignObject(stateID, {common: {custom: {[this.namespace]: {
+							valueAtDeviceReset: resolvedReading.resetOffset,
+							valueAtDeviceInit: reading,
+						}}}});
+					} else if (resolvedReading.type === 'decrease') {
+						this.log.info(`Cumulative reading for ${stateID} decreased while reset detection is disabled`);
+					}
+					reading = resolvedReading.reading;
 				}
-
-				reading = reading + this.activeStates[stateID].calcValues.valueAtDeviceReset;
-			} else if (currentCath !== 'Watt') {
-				this.log.error(`[calculationHandler] unforeseen situation for ${stateID} with value ${reading}, please send this to developer | reading : ${reading} | calcvalues : ${JSON.stringify(stateDetails)}`);
 			}
 
 			this.log.debug(`[calculationHandler] ${stateID} set cumulated value ${reading}`);
@@ -1957,7 +2053,7 @@ class Sourceanalytix extends utils.Adapter {
 				priceQuarter: calculations.priceQuarter,
 				priceYear: calculations.priceYear,
 			};
-			if (this.isDynamicPriceState(stateID)) {
+			if (this.usesHistoricalCostCalculation(stateID)) {
 				const dynamicCalculationRounded = await this.calculateDynamicCostsForState(stateID, reading, readingTimestamp);
 				if (dynamicCalculationRounded && this.activeStates[stateID].dynamicCosts) {
 					variableCosts = this.activeStates[stateID].dynamicCosts.totals;

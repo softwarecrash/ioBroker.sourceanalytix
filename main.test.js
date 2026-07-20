@@ -5,13 +5,16 @@ const {
 	calculateBasicPriceTotals,
 	classifyCumulativeReading,
 	getPeriodChanges,
+	resolveCumulativeReading,
 } = require('./lib/calculation');
 const {
 	calculatePriceDelta,
+	getSelectorPrice,
 	getPriceForTimestamp,
 	normalizeDynamicCostMemory,
 	normalizePriceHistory,
 	parsePriceValue,
+	parseValidityTimestamp,
 } = require('./lib/dynamic-pricing');
 
 const minute = 60_000;
@@ -28,6 +31,20 @@ describe('dynamic pricing', () => {
 			assert.equal(parsePriceValue(''), null);
 			assert.equal(parsePriceValue('invalid'), null);
 			assert.equal(parsePriceValue(false), null);
+		});
+	});
+
+	describe('tariff configuration', () => {
+		it('parses timestamps and ISO dates for scheduled fixed prices', () => {
+			assert.equal(parseValidityTimestamp('2026-01-01T10:00:00.000Z', 1), at(10));
+			assert.equal(parseValidityTimestamp('', 123), 123);
+		});
+
+		it('switches tariffs with boolean, contact and configured values', () => {
+			assert.equal(getSelectorPrice(false, 0.2, 0.4), 0.2);
+			assert.equal(getSelectorPrice(true, 0.2, 0.4), 0.4);
+			assert.equal(getSelectorPrice('closed', 0.2, 0.4), 0.2);
+			assert.equal(getSelectorPrice('night', 0.2, 0.4, 'night'), 0.4);
 		});
 	});
 
@@ -208,6 +225,28 @@ describe('period and cumulative calculations', () => {
 
 		it('preserves explicitly disabled reset handling', () => {
 			assert.deepEqual(classifyCumulativeReading(100, 100.5, false, 1), {type: 'decrease', decrease: 0.5});
+		});
+	});
+
+	describe('resolveCumulativeReading', () => {
+		it('anchors a reset at the previous cumulative value and continues from there', () => {
+			assert.deepEqual(resolveCumulativeReading(0, 0, 102, true, 1), {
+				type: 'reset', decrease: 102, reading: 102, resetOffset: 102,
+			});
+			assert.deepEqual(resolveCumulativeReading(1, 102, 102, true, 1), {
+				type: 'normal', decrease: 0, reading: 103, resetOffset: 102,
+			});
+		});
+
+		it('supports replacement meters which start above zero', () => {
+			assert.equal(resolveCumulativeReading(50, 0, 102, true, 1).resetOffset, 52);
+			assert.equal(resolveCumulativeReading(51, 52, 102, true, 1).reading, 103);
+		});
+
+		it('keeps small backwards jitter at the accepted high-water mark', () => {
+			assert.deepEqual(resolveCumulativeReading(99.9, 0, 100, true, 0.2), {
+				type: 'jitter', decrease: 0.09999999999999432, reading: 100, resetOffset: 0,
+			});
 		});
 	});
 

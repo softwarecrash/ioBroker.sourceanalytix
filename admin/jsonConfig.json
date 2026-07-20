@@ -189,6 +189,10 @@
                 {
                   "label": "State value",
                   "value": "state"
+                },
+                {
+                  "label": "Tariff selector",
+                  "value": "selector"
                 }
               ]
             },
@@ -207,7 +211,32 @@
               "title": "Price state",
               "width": "18%",
               "default": "",
-              "hidden": "data.priceSource !== 'state'"
+              "hidden": "data.priceSource === 'static'"
+            },
+            {
+              "type": "number",
+              "attr": "alternatePrice",
+              "title": "Active tariff price",
+              "width": "13%",
+              "default": 0,
+              "step": 0.0001,
+              "hidden": "data.priceSource !== 'selector'"
+            },
+            {
+              "type": "text",
+              "attr": "selectorValue",
+              "title": "Active selector value",
+              "width": "11%",
+              "default": "",
+              "hidden": "data.priceSource !== 'selector'"
+            },
+            {
+              "type": "datePicker",
+              "attr": "validFrom",
+              "title": "Valid from",
+              "width": "13%",
+              "default": "",
+              "hidden": "data.priceSource !== 'static'"
             },
             {
               "type": "number",

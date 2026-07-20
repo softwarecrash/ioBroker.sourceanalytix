@@ -1,4 +1,3 @@
-/* eslint-disable no-mixed-spaces-and-tabs */
 'use strict';
 
 /*
@@ -33,7 +32,6 @@ class Sourceanalytix extends utils.Adapter {
      * @param {Partial<utils.AdapterOptions>} [options={}]
      */
 	constructor(options) {
-		// @ts-ignore
 		super({
 			...options,
 			name: 'sourceanalytix',
@@ -100,7 +98,6 @@ class Sourceanalytix extends utils.Adapter {
 					if (customStateArray.rows[index].value) { // Avoid crash if object is null or empty
 
 						// Check if custom object contains data for SourceAnalytix
-						// @ts-ignore
 						if (customStateArray.rows[index].value[this.namespace]){
 
 							// Simplify stateID
@@ -108,7 +105,6 @@ class Sourceanalytix extends utils.Adapter {
 							this.log.debug(`SourceAnalytix configuration found for ${stateID}`);
 
 							// Check if custom object is enabled for SourceAnalytix
-							// @ts-ignore
 							if(customStateArray.rows[index].value[this.namespace].enabled){
 								// Prepare array in constructor for further processing
 								this.activeStates[stateID] = {};
@@ -158,10 +154,10 @@ class Sourceanalytix extends utils.Adapter {
 
 			// Enable all calculations with timeout of 500 ms
 			if (delay) {
-				clearTimeout(delay);
+				this.clearTimeout(delay);
 				delay = null;
 			}
-			delay = setTimeout(function () {
+			delay = this.setTimeout(function () {
 				calcBlock = false;
 			}, 500);
 
@@ -309,7 +305,8 @@ class Sourceanalytix extends utils.Adapter {
 			try {
 				historyEntries = JSON.parse(historyState.val.toString());
 			} catch (error) {
-				this.log.warn(`[loadPriceHistory] Cannot parse dynamic price history for ${priceDefinition}: ${error.message}`);
+				const message = error instanceof Error ? error.message : String(error);
+				this.log.warn(`[loadPriceHistory] Cannot parse dynamic price history for ${priceDefinition}: ${message}`);
 			}
 		}
 		this.priceHistories[priceDefinition] = this.normalizePriceHistory(historyEntries);
@@ -457,7 +454,8 @@ class Sourceanalytix extends utils.Adapter {
 			const stateValue = state ? this.parsePriceValue(state.val) : null;
 			return stateValue === null ? fallback : stateValue;
 		} catch (error) {
-			this.log.debug(`[readCostStateOrFallback] Could not read ${stateID}, using fallback ${fallback}: ${error.message}`);
+			const message = error instanceof Error ? error.message : String(error);
+			this.log.debug(`[readCostStateOrFallback] Could not read ${stateID}, using fallback ${fallback}: ${message}`);
 			return fallback;
 		}
 	}
@@ -876,8 +874,8 @@ class Sourceanalytix extends utils.Adapter {
 						stateType: customData.selectedPrice,
 						stateUnit: useUnit,
 						useUnit: selectedPriceConfig.unitType,
-						deviceResetLogicEnabled: customData.deviceResetLogicEnabled != null ? customData.deviceResetLogicEnabled || true : true,
-						threshold: customData.threshold != null ? customData.threshold || 1 : 1,
+						deviceResetLogicEnabled: customData.deviceResetLogicEnabled ?? true,
+						threshold: customData.threshold ?? 1,
 					},
 					calcValues: {
 						cumulativeValue: cumulativeValue,
@@ -1519,10 +1517,10 @@ class Sourceanalytix extends utils.Adapter {
 
 				// Enable all calculations with timeout of 500 ms
 				if (delay) {
-					clearTimeout(delay);
+					this.clearTimeout(delay);
 					delay = null;
 				}
-				delay = setTimeout(function () {
+				delay = this.setTimeout(function () {
 					calcBlock = false;
 				}, 500);
 
@@ -1726,7 +1724,7 @@ class Sourceanalytix extends utils.Adapter {
 					await this.delObjectAsync(stateName);
 				}
 			}
-		} catch (error) {
+		} catch {
 			// do nothing
 		}
 	}
@@ -2252,8 +2250,7 @@ class Sourceanalytix extends utils.Adapter {
 		// Get first day of year
 		const yearStart = new Date(Date.UTC(d.getUTCFullYear(), 0, 1));
 		// Calculate full weeks to nearest Thursday
-		// @ts-ignore subtracting dates is fine
-		let weekNo = Math.ceil((((d - yearStart) / 86400000) + 1) / 7).toString();
+		let weekNo = Math.ceil((((d.getTime() - yearStart.getTime()) / 86400000) + 1) / 7).toString();
 
 		if (weekNo.length === 1) {
 			weekNo = '0' + weekNo;
@@ -2321,15 +2318,14 @@ class Sourceanalytix extends utils.Adapter {
 		try {
 			this.log.info(`SourceAnalytix stopped, now you have to calculate by yourself :'( ...`);
 			callback();
-		} catch (e) {
+		} catch {
 			callback();
 		}
 	}
 
 }
 
-//@ts-ignore .parent exists
-if (module.parent) {
+if (require.main !== module) {
 	// Export the constructor in compact mode
 	/**
      * @param {Partial<utils.AdapterOptions>} [options={}]

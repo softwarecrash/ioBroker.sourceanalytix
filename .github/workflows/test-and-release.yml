@@ -26,7 +26,7 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - uses: ioBroker/testing-action-check@v1
+      - uses: ioBroker/testing-action-check@v2
         with:
           node-version: '24.x'
           # Uncomment the following line if your adapter cannot be installed using 'npm ci'
@@ -70,6 +70,7 @@ jobs:
     # Write permissions are required to create Github releases
     permissions:
       contents: write
+      id-token: write
 
     steps:
       - uses: ioBroker/testing-action-deploy@v1
@@ -77,8 +78,7 @@ jobs:
           node-version: '24.x'
           # Uncomment the following line if your adapter cannot be installed using 'npm ci'
           # install-command: 'npm install'
-          npm-token: ${{ secrets.NPM_TOKEN }}
-          github-token: ${{ secrets.AUTOMERGER }}
+          github-token: ${{ secrets.GITHUB_TOKEN }}
 
           # When using Sentry for error reporting, Sentry can be informed about new releases
           # To enable create a API-Token in Sentry (User settings, API keys)

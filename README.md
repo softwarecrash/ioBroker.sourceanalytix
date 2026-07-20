@@ -252,6 +252,7 @@ When the adapter crashes or any other Code error happens, this error message tha
 
 ### __WORK IN PROGRESS__
 * (softwarecrash) Add timestamped dynamic unit prices from ioBroker states
+* (softwarecrash) Preserve unrounded dynamic cost accumulators across adapter restarts
 * (softwarecrash) Migrate instance and custom settings to Admin jsonConfig
 * (softwarecrash) Require Node.js 22 and modernize dependencies, linting, CI and releases
 * (softwarecrash) Add automated tests for historical and quarter-hourly price calculations

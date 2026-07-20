@@ -406,6 +406,91 @@ class Sourceanalytix extends utils.Adapter {
 	}
 
 	/**
+	 * @param {string} stateID - Source state ID
+	 * @returns {string} Local state ID for persistent dynamic cost memory
+	 */
+	getDynamicCostMemoryStateName(stateID) {
+		return `${this.activeStates[stateID].stateDetails.deviceName}.dynamicCostMemory`;
+	}
+
+	/**
+	 * @param {string} stateID - Source state ID
+	 */
+	async ensureDynamicCostMemoryState(stateID) {
+		if (this.activeStates[stateID].dynamicCostMemoryStateReady) return;
+		const memoryStateName = this.getDynamicCostMemoryStateName(stateID);
+		await this.extendObjectAsync(memoryStateName, {
+			type: 'state',
+			common: {
+				name: 'Dynamic cost calculation memory',
+				type: 'string',
+				role: 'json',
+				read: true,
+				write: false,
+				def: '',
+			},
+			native: {
+				sourceState: stateID,
+			},
+		});
+		this.activeStates[stateID].dynamicCostMemoryStateReady = true;
+	}
+
+	/**
+	 * @param {string} stateID - Source state ID
+	 * @returns {Promise<object | null>} Valid persisted memory, or null when unavailable
+	 */
+	async loadDynamicCostMemory(stateID) {
+		await this.ensureDynamicCostMemoryState(stateID);
+		const memoryStateName = this.getDynamicCostMemoryStateName(stateID);
+		const memoryState = await this.getStateAsync(memoryStateName);
+		if (!memoryState || !memoryState.val) return null;
+
+		try {
+			const parsedMemory = JSON.parse(memoryState.val.toString());
+			const memory = dynamicPricing.normalizeDynamicCostMemory(parsedMemory);
+			if (!memory) {
+				this.log.warn(`[loadDynamicCostMemory] Ignoring invalid calculation memory for ${stateID}`);
+				return null;
+			}
+			const priceDefinition = this.activeStates[stateID].stateDetails.stateType;
+			if (memory.priceDefinition !== priceDefinition) {
+				this.log.info(`[loadDynamicCostMemory] Ignoring calculation memory for ${stateID} because price definition changed from ${memory.priceDefinition} to ${priceDefinition}`);
+				return null;
+			}
+			this.log.info(`Restored precise dynamic cost memory for ${stateID} from ${new Date(memory.lastTs).toISOString()}`);
+			this.log.debug(`[loadDynamicCostMemory] Restored precise dynamic costs for ${stateID}: ${JSON.stringify(memory)}`);
+			return memory;
+		} catch (error) {
+			const message = error instanceof Error ? error.message : String(error);
+			this.log.warn(`[loadDynamicCostMemory] Cannot parse calculation memory for ${stateID}: ${message}`);
+			return null;
+		}
+	}
+
+	/**
+	 * @param {string} stateID - Source state ID
+	 * @param {object} dynamicCosts - Unrounded dynamic cost memory
+	 */
+	async persistDynamicCostMemory(stateID, dynamicCosts) {
+		await this.ensureDynamicCostMemoryState(stateID);
+		const memoryStateName = this.getDynamicCostMemoryStateName(stateID);
+		const payload = {
+			version: 1,
+			priceDefinition: this.activeStates[stateID].stateDetails.stateType,
+			lastReading: dynamicCosts.lastReading,
+			lastTs: dynamicCosts.lastTs,
+			totals: dynamicCosts.totals,
+		};
+		const memory = dynamicPricing.normalizeDynamicCostMemory(payload);
+		if (!memory) throw new Error(`Cannot persist invalid dynamic cost memory for ${stateID}`);
+		await this.setStateAsync(memoryStateName, {
+			val: JSON.stringify(memory),
+			ack: true,
+		});
+	}
+
+	/**
 	 * Initialise dynamic cost memory from existing states, so restarts do not revalue past consumption.
 	 * @param {string} stateID - Source state ID
 	 * @param {number} reading - Current cumulative reading
@@ -434,6 +519,12 @@ class Sourceanalytix extends utils.Adapter {
 			return activeState.dynamicCosts;
 		}
 
+		const persistedMemory = await this.loadDynamicCostMemory(stateID);
+		if (persistedMemory) {
+			activeState.dynamicCosts = persistedMemory;
+			return activeState.dynamicCosts;
+		}
+
 		const unitPrice = this.getNumberOrDefault(activeState.prices.unitPrice, 0);
 		const fallbackTotals = this.getFallbackDynamicCostTotals(readingNumber, activeState.calcValues, unitPrice);
 		const stateRoot = `${activeState.stateDetails.deviceName}.currentYear.${activeState.stateDetails.financialCategory}`;
@@ -450,6 +541,8 @@ class Sourceanalytix extends utils.Adapter {
 			lastTs: readingTimestamp,
 			totals: totals
 		};
+		await this.persistDynamicCostMemory(stateID, activeState.dynamicCosts);
+		this.log.info(`Initialized precise dynamic cost memory for ${stateID} from existing cost states`);
 		this.log.debug(`[ensureDynamicCostMemory] Initialized dynamic costs for ${stateID}: ${JSON.stringify(activeState.dynamicCosts)}`);
 		return activeState.dynamicCosts;
 	}
@@ -477,6 +570,7 @@ class Sourceanalytix extends utils.Adapter {
 		if (lastReading === null) {
 			dynamicCosts.lastReading = readingNumber;
 			dynamicCosts.lastTs = readingTimestamp;
+			await this.persistDynamicCostMemory(stateID, dynamicCosts);
 			return this.roundDynamicCostTotals(dynamicCosts);
 		}
 
@@ -485,6 +579,7 @@ class Sourceanalytix extends utils.Adapter {
 			this.log.warn(`[calculateDynamicCostsForState] Cumulative reading for ${stateID} decreased from ${lastReading} to ${readingNumber}, resetting dynamic cost tracker`);
 			dynamicCosts.lastReading = readingNumber;
 			dynamicCosts.lastTs = readingTimestamp;
+			await this.persistDynamicCostMemory(stateID, dynamicCosts);
 			return this.roundDynamicCostTotals(dynamicCosts);
 		}
 
@@ -501,9 +596,11 @@ class Sourceanalytix extends utils.Adapter {
 			dynamicCosts.totals.priceYear = this.getNumberOrDefault(dynamicCosts.totals.priceYear, 0) + priceDelta;
 			dynamicCosts.lastReading = readingNumber;
 			dynamicCosts.lastTs = readingTimestamp;
+			await this.persistDynamicCostMemory(stateID, dynamicCosts);
 			this.log.debug(`[calculateDynamicCostsForState] Added dynamic cost delta ${priceDelta} for ${delta} consumption from ${stateID} at ${new Date(readingTimestamp).toISOString()}`);
 		} else if (readingTimestamp > this.getNumberOrDefault(dynamicCosts.lastTs, 0)) {
 			dynamicCosts.lastTs = readingTimestamp;
+			await this.persistDynamicCostMemory(stateID, dynamicCosts);
 		}
 
 		return this.roundDynamicCostTotals(dynamicCosts);
@@ -515,7 +612,7 @@ class Sourceanalytix extends utils.Adapter {
 	 * @param {number} reading - Current cumulative reading
 	 * @param {object} beforeReset - Date information before reset
 	 */
-	resetDynamicCostMemory(stateID, reading, beforeReset) {
+	async resetDynamicCostMemory(stateID, reading, beforeReset) {
 		if (!this.isDynamicPriceState(stateID)) return;
 
 		const activeState = this.activeStates[stateID];
@@ -534,6 +631,7 @@ class Sourceanalytix extends utils.Adapter {
 				priceYear: beforeReset.year === actualDate.year ? this.getNumberOrDefault(existingTotals.priceYear, 0) : 0,
 			}
 		};
+		await this.persistDynamicCostMemory(stateID, activeState.dynamicCosts);
 		this.log.debug(`[resetDynamicCostMemory] Reset dynamic costs for ${stateID}: ${JSON.stringify(activeState.dynamicCosts)}`);
 	}
 
@@ -1225,9 +1323,9 @@ class Sourceanalytix extends utils.Adapter {
 							this.activeStates[stateID].calcValues.previousReadingWattTs = null;
 						}
 
-						this.activeStates[stateID].calcValues = obj.common.custom[this.namespace];
-						this.activeStates[stateID].calcValues.cumulativeValue = reading;
-						this.resetDynamicCostMemory(stateID, reading, beforeReset);
+							this.activeStates[stateID].calcValues = obj.common.custom[this.namespace];
+							this.activeStates[stateID].calcValues.cumulativeValue = reading;
+							await this.resetDynamicCostMemory(stateID, reading, beforeReset);
 
 						//At week reset ensure current week values are moved to previous week and current set to 0
 						if (beforeReset.week !== actualDate.week) {

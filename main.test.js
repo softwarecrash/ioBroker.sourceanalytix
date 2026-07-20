@@ -4,6 +4,7 @@ const assert = require('node:assert/strict');
 const {
 	calculatePriceDelta,
 	getPriceForTimestamp,
+	normalizeDynamicCostMemory,
 	normalizePriceHistory,
 	parsePriceValue,
 } = require('./lib/dynamic-pricing');
@@ -120,6 +121,48 @@ describe('dynamic pricing', () => {
 			const result = calculatePriceDelta(shortHistory, 2, at(10), at(10) + 2 * minute);
 			if (result === null) assert.fail('Expected a calculated price delta');
 			assert.ok(Math.abs(result - 0.6) < 1e-12);
+		});
+	});
+
+	describe('normalizeDynamicCostMemory', () => {
+		const preciseMemory = {
+			version: 1,
+			priceDefinition: 'Electricity',
+			lastReading: 7837.556,
+			lastTs: at(11),
+			totals: {
+				priceDay: 0.960789,
+				priceWeek: 0.960789,
+				priceMonth: 1.340789,
+				priceQuarter: 1.340789,
+				priceYear: 1.340789,
+			},
+		};
+
+		it('preserves unrounded costs through a JSON restart round-trip', () => {
+			const restoredMemory = normalizeDynamicCostMemory(JSON.parse(JSON.stringify(preciseMemory)));
+			assert.deepEqual(restoredMemory, preciseMemory);
+		});
+
+		it('continues from precise totals after a restart', () => {
+			const restoredMemory = normalizeDynamicCostMemory(JSON.parse(JSON.stringify(preciseMemory)));
+			if (!restoredMemory) assert.fail('Expected valid persisted memory');
+
+			const history = [
+				{ts: at(10), price: 0.25},
+				{ts: at(11), price: 0.4},
+			];
+			const priceDelta = calculatePriceDelta(history, 1, at(10, 30), at(11, 30));
+			if (priceDelta === null) assert.fail('Expected a calculated price delta');
+
+			assert.equal(priceDelta, 0.325);
+			assert.equal(restoredMemory.totals.priceDay + priceDelta, 1.285789);
+		});
+
+		it('rejects incompatible versions and incomplete totals', () => {
+			assert.equal(normalizeDynamicCostMemory({...preciseMemory, version: 2}), null);
+			assert.equal(normalizeDynamicCostMemory({...preciseMemory, totals: {priceDay: 1}}), null);
+			assert.equal(normalizeDynamicCostMemory(null), null);
 		});
 	});
 });

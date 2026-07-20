@@ -251,6 +251,9 @@ When the adapter crashes or any other Code error happens, this error message tha
 ## Changelog
 
 ### __WORK IN PROGRESS__
+* (softwarecrash) Add timestamped dynamic unit prices from ioBroker states
+* (softwarecrash) Migrate instance and custom settings to Admin jsonConfig
+* (softwarecrash) Require Node.js 22 and modernize dependencies, linting, CI and releases
 * (DutchmanNL) Solved issues reported by sentry
 * (DutchmanNL) Improved some logging, code polishing
 * (DutchmanNL) Bugfix: "is missing required property common.type" fixes #883
@@ -288,10 +291,12 @@ When the adapter crashes or any other Code error happens, this error message tha
 * (DutchmanNL) Added support for Admin 5 (Requires Admin >= 5.1.2)
 * (Bluefox) Fix error in admin
 
+[Older changelog entries](CHANGELOG_OLD.md)
+
 ## License
 MIT License
 
-Copyright (c) 2022 DrozmotiX Services B.V.
+Copyright (c) 2022-2026 DrozmotiX Services B.V.
 
 Permission is hereby granted, free of charge, to any person obtaining a copy
 of this software and associated documentation files (the "Software"), to deal

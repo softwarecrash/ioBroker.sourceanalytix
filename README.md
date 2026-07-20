@@ -254,6 +254,8 @@ When the adapter crashes or any other Code error happens, this error message tha
 * (softwarecrash) Add timestamped dynamic unit prices from ioBroker states
 * (softwarecrash) Migrate instance and custom settings to Admin jsonConfig
 * (softwarecrash) Require Node.js 22 and modernize dependencies, linting, CI and releases
+* (softwarecrash) Add automated tests for historical and quarter-hourly price calculations
+* (softwarecrash) Update Admin 7 documentation screenshots and resolve development dependency advisories
 * (DutchmanNL) Solved issues reported by sentry
 * (DutchmanNL) Improved some logging, code polishing
 * (DutchmanNL) Bugfix: "is missing required property common.type" fixes #883

@@ -2,6 +2,11 @@
 
 const assert = require('node:assert/strict');
 const {
+	calculateBasicPriceTotals,
+	classifyCumulativeReading,
+	getPeriodChanges,
+} = require('./lib/calculation');
+const {
 	calculatePriceDelta,
 	getPriceForTimestamp,
 	normalizeDynamicCostMemory,
@@ -163,6 +168,65 @@ describe('dynamic pricing', () => {
 			assert.equal(normalizeDynamicCostMemory({...preciseMemory, version: 2}), null);
 			assert.equal(normalizeDynamicCostMemory({...preciseMemory, totals: {priceDay: 1}}), null);
 			assert.equal(normalizeDynamicCostMemory(null), null);
+		});
+	});
+});
+
+describe('period and cumulative calculations', () => {
+	describe('getPeriodChanges', () => {
+		it('identifies all affected periods at a year boundary', () => {
+			assert.deepEqual(
+				getPeriodChanges(
+					{day: '03_Wednesday', week: '53', month: '12_December', quarter: 4, year: 2025},
+					{day: '04_Thursday', week: '01', month: '01_January', quarter: 1, year: 2026},
+				),
+				{day: true, week: true, month: true, quarter: true, year: true},
+			);
+		});
+
+		it('changes only the day during a normal midnight rollover', () => {
+			assert.deepEqual(
+				getPeriodChanges(
+					{day: '02_Tuesday', week: '30', month: '07_July', quarter: 3, year: 2026},
+					{day: '03_Wednesday', week: '30', month: '07_July', quarter: 3, year: 2026},
+				),
+				{day: true, week: false, month: false, quarter: false, year: false},
+			);
+		});
+	});
+
+	describe('classifyCumulativeReading', () => {
+		it('ignores a small backwards fluctuation within the configured threshold', () => {
+			const result = classifyCumulativeReading(7837.612, 7837.613, true, 1);
+			assert.equal(result.type, 'jitter');
+			assert.ok(Math.abs(result.decrease - 0.001) < 1e-9);
+		});
+
+		it('keeps large decreases as device resets', () => {
+			assert.deepEqual(classifyCumulativeReading(100, 102, true, 1), {type: 'reset', decrease: 2});
+		});
+
+		it('preserves explicitly disabled reset handling', () => {
+			assert.deepEqual(classifyCumulativeReading(100, 100.5, false, 1), {type: 'decrease', decrease: 0.5});
+		});
+	});
+
+	describe('calculateBasicPriceTotals', () => {
+		it('allocates a monthly price over calendar periods', () => {
+			const totals = calculateBasicPriceTotals(29, new Date(2024, 1, 15, 12));
+			assert.equal(totals.priceDay, 1);
+			assert.equal(totals.priceMonth, 29);
+			assert.equal(totals.priceQuarter, 58);
+			assert.equal(totals.priceYear, 58);
+		});
+
+		it('uses the correct daily shares when a week crosses a month boundary', () => {
+			const totals = calculateBasicPriceTotals(31, new Date(2026, 3, 1, 12));
+			assert.ok(Math.abs(totals.priceDay - (31 / 30)) < 1e-12);
+			assert.ok(Math.abs(totals.priceWeek - (2 + (31 / 30))) < 1e-12);
+			assert.equal(totals.priceMonth, 31);
+			assert.equal(totals.priceQuarter, 31);
+			assert.equal(totals.priceYear, 124);
 		});
 	});
 });

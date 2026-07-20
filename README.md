@@ -180,6 +180,8 @@ Price definitions can use a fixed price or a dynamic price state. Use `static` i
 
 Dynamic prices are stored as a timestamped price history. A price state change only applies to consumption values from that timestamp onward; already calculated costs are not recalculated when the current price changes. For each consumption event SourceAnalytix uses the price that was valid at the consumption state's timestamp. If a cumulative meter delta spans multiple price intervals, SourceAnalytix splits the delta proportionally over the elapsed time between the two readings.
 
+`Price p/m` is a monthly basic price. It is included only for source states where `Including basic rate` is enabled. Monthly, quarterly and yearly totals include the calendar months that have started. Day and week totals use the daily share of the monthly price, based on the number of days in each calendar month. This also handles weeks that cross a month boundary.
+
 **Issue 8** current value **<** previousInit<br/>
 A device reset is detected, see function 7
 
@@ -253,6 +255,10 @@ When the adapter crashes or any other Code error happens, this error message tha
 ### __WORK IN PROGRESS__
 * (softwarecrash) Add timestamped dynamic unit prices from ioBroker states
 * (softwarecrash) Preserve unrounded dynamic cost accumulators across adapter restarts
+* (softwarecrash) Reset current period values at midnight and create new year statistics on time
+* (softwarecrash) Respect disabled weekday, previous-period and meter-reading states during updates
+* (softwarecrash) Ignore small cumulative meter fluctuations within the configured reset threshold
+* (softwarecrash) Calculate configured monthly basic prices for all current periods
 * (softwarecrash) Migrate instance and custom settings to Admin jsonConfig
 * (softwarecrash) Require Node.js 22 and modernize dependencies, linting, CI and releases
 * (softwarecrash) Add automated tests for historical and quarter-hourly price calculations

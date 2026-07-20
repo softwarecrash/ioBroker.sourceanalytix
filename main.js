@@ -9,6 +9,7 @@
 const utils = require('@iobroker/adapter-core');
 const adapterHelpers = require('iobroker-adapter-helpers'); // Lib used for Unit calculations
 const schedule = require('cron').CronJob; // Cron Scheduler
+const calculation = require('./lib/calculation');
 const dynamicPricing = require('./lib/dynamic-pricing');
 
 // Sentry error reporting, disable when testing alpha source code locally!
@@ -197,6 +198,28 @@ class Sourceanalytix extends utils.Adapter {
 	getNumberOrDefault(value, defaultValue) {
 		const parsedValue = this.parsePriceValue(value);
 		return parsedValue === null ? defaultValue : parsedValue;
+	}
+
+	/**
+	 * Add the configured monthly basic price to current period totals.
+	 * @param {string} stateID - Source state ID
+	 * @param {object} totals - Variable cost totals
+	 * @param {Date} date - Calculation date
+	 * @returns {Promise<object>} Rounded totals including the basic price
+	 */
+	async addBasicPriceTotals(stateID, totals, date) {
+		const activeState = this.activeStates[stateID];
+		const includeBasicPrice = !!(activeState && activeState.stateDetails && activeState.stateDetails.basicRate);
+		const monthlyPrice = includeBasicPrice ? this.getNumberOrDefault(activeState.prices.basicPrice, 0) : 0;
+		const basicTotals = calculation.calculateBasicPriceTotals(monthlyPrice, date);
+
+		return {
+			priceDay: await this.roundCosts(this.getNumberOrDefault(totals.priceDay, 0) + basicTotals.priceDay),
+			priceWeek: await this.roundCosts(this.getNumberOrDefault(totals.priceWeek, 0) + basicTotals.priceWeek),
+			priceMonth: await this.roundCosts(this.getNumberOrDefault(totals.priceMonth, 0) + basicTotals.priceMonth),
+			priceQuarter: await this.roundCosts(this.getNumberOrDefault(totals.priceQuarter, 0) + basicTotals.priceQuarter),
+			priceYear: await this.roundCosts(this.getNumberOrDefault(totals.priceYear, 0) + basicTotals.priceYear),
+		};
 	}
 
 	/**
@@ -624,7 +647,7 @@ class Sourceanalytix extends utils.Adapter {
 			lastReading: readingNumber,
 			lastTs: Date.now(),
 			totals: {
-				priceDay: 0,
+				priceDay: beforeReset.day === actualDate.day ? this.getNumberOrDefault(existingTotals.priceDay, 0) : 0,
 				priceWeek: beforeReset.week === actualDate.week ? this.getNumberOrDefault(existingTotals.priceWeek, 0) : 0,
 				priceMonth: beforeReset.month === actualDate.month ? this.getNumberOrDefault(existingTotals.priceMonth, 0) : 0,
 				priceQuarter: beforeReset.quarter === actualDate.quarter ? this.getNumberOrDefault(existingTotals.priceQuarter, 0) : 0,
@@ -674,10 +697,12 @@ class Sourceanalytix extends utils.Adapter {
 			});
 		}
 
-		await this.setStateChangedAsync(`${stateName}.currentWeek.${weekdays[date.getDay()]}`, {
-			val: calculationRounded.priceDay,
-			ack: true
-		});
+		if (this.config.currentYearDays) {
+			await this.setStateChangedAsync(`${stateName}.currentWeek.${weekdays[date.getDay()]}`, {
+				val: calculationRounded.priceDay,
+				ack: true
+			});
+		}
 
 		stateName = `${this.namespace}.${stateDetails.deviceName}.${actualDate.year}.${stateDetails.financialCategory}`;
 		if (storeSettings.storeWeeks) await this.setStateChangedAsync(`${stateName}.weeks.${actualDate.week}`, {
@@ -692,6 +717,46 @@ class Sourceanalytix extends utils.Adapter {
 			val: calculationRounded.priceQuarter,
 			ack: true
 		});
+	}
+
+	/**
+	 * Write consumption calculation states.
+	 * @param {string} stateID - Source state ID
+	 * @param {object} calculationRounded - Rounded consumption values
+	 * @param {Date} date - Current date
+	 */
+	async writeConsumptionStates(stateID, calculationRounded, date) {
+		if (!this.activeStates[stateID] || !this.activeStates[stateID].stateDetails) return;
+		const stateDetails = this.activeStates[stateID].stateDetails;
+		let stateName = `${this.namespace}.${stateDetails.deviceName}.currentYear.${stateDetails.headCategory}`;
+		const currentValues = [
+			['01_currentDay', calculationRounded.consumedDay],
+			['02_currentWeek', calculationRounded.consumedWeek],
+			['03_currentMonth', calculationRounded.consumedMonth],
+			['04_currentQuarter', calculationRounded.consumedQuarter],
+			['05_currentYear', calculationRounded.consumedYear],
+		];
+		for (const [state, value] of currentValues) {
+			await this.setStateChangedAsync(`${stateName}.${state}`, {val: value, ack: true});
+		}
+
+		if (this.config.store_weeks || this.config.store_months || this.config.store_quarters) {
+			await this.setStateChangedAsync(`${this.namespace}.${stateDetails.deviceName}.${actualDate.year}.${stateDetails.headCategory}Cumulative`, {
+				val: calculationRounded.consumedYear,
+				ack: true
+			});
+		}
+		if (this.config.currentYearDays) {
+			await this.setStateChangedAsync(`${stateName}.currentWeek.${weekdays[date.getDay()]}`, {
+				val: calculationRounded.consumedDay,
+				ack: true
+			});
+		}
+
+		stateName = `${this.namespace}.${stateDetails.deviceName}.${actualDate.year}.${stateDetails.headCategory}`;
+		if (storeSettings.storeWeeks) await this.setStateChangedAsync(`${stateName}.weeks.${actualDate.week}`, {val: calculationRounded.consumedWeek, ack: true});
+		if (storeSettings.storeMonths) await this.setStateChangedAsync(`${stateName}.months.${actualDate.month}`, {val: calculationRounded.consumedMonth, ack: true});
+		if (storeSettings.storeQuarters) await this.setStateChangedAsync(`${stateName}.quarters.Q${actualDate.quarter}`, {val: calculationRounded.consumedQuarter, ack: true});
 	}
 
 	//ToDo 0.5: Implement cleanup for unused states
@@ -893,6 +958,7 @@ class Sourceanalytix extends utils.Adapter {
 				this.activeStates[stateID] = {
 					stateDetails: {
 						alias: customData.alias !== '' ? customData.alias : '',
+						basicRate: customData.basicRate === true,
 						consumption: customData.consumption,
 						costs: customData.costs,
 						deviceName: newDeviceName.toString(),
@@ -938,6 +1004,31 @@ class Sourceanalytix extends utils.Adapter {
 		}
 	}
 
+	/**
+	 * Create the configured statistics objects for the active calendar year.
+	 * @param {string} stateID - Source state ID
+	 */
+	async initializeYearStatisticsStates(stateID) {
+		if (!this.activeStates[stateID] || !this.activeStates[stateID].stateDetails) return;
+		const stateDetails = this.activeStates[stateID].stateDetails;
+
+		for (let yearWeek = 1; yearWeek < 54; yearWeek++) {
+			const weekNumber = yearWeek < 10 ? `0${yearWeek}` : yearWeek.toString();
+			await this.doLocalStateCreate(stateID, `weeks.${weekNumber}`, weekNumber, false, !this.config.store_weeks);
+		}
+		for (const month of months) {
+			await this.doLocalStateCreate(stateID, `months.${month}`, month, false, !this.config.store_months);
+		}
+		for (let quarter = 1; quarter < 5; quarter++) {
+			await this.doLocalStateCreate(stateID, `quarters.Q${quarter}`, `Q${quarter}`, false, !this.config.store_quarters);
+		}
+
+		const storeYearStatistics = !!(this.config.store_weeks || this.config.store_months || this.config.store_quarters);
+		await this.doLocalStateCreate(stateID, `${actualDate.year}.${stateDetails.headCategory}Cumulative`, `${stateDetails.headCategory}Cumulative`, true, !storeYearStatistics || !stateDetails.consumption);
+		await this.doLocalStateCreate(stateID, `${actualDate.year}.${stateDetails.financialCategory}Cumulative`, `${stateDetails.financialCategory}Cumulative`, true, !storeYearStatistics || !stateDetails.costs, false, useCurrency);
+		await this.doLocalStateCreate(stateID, `${actualDate.year}.readingCumulative`, 'Cumulative Reading of Year total', true, !storeYearStatistics);
+	}
+
 	// Create object tree and states for all devices to be handled
 	async initialize(stateID) {
 		try {
@@ -980,7 +1071,7 @@ class Sourceanalytix extends utils.Adapter {
 					await this.doLocalStateCreate(stateID, `currentWeek.${weekdays[x]}`, weekdays[x], false, true, true);
 				}
 
-				if (this.config.currentYearPrevious === true) {
+				if (this.config.currentYearDays === true && this.config.currentYearPrevious === true) {
 					await this.doLocalStateCreate(stateID, `previousWeek.${weekdays[x]}`, weekdays[x], false, false, true);
 				} else if (stateDeletion) {
 					this.log.debug(`Deleting states for week ${weekdays[x]} (if present)`);
@@ -989,65 +1080,11 @@ class Sourceanalytix extends utils.Adapter {
 				}
 			}
 
-			// create states for weeks
-			for (let y = 1; y < 54; y++) {
-				let weekNr;
-				if (y < 10) {
-					weekNr = '0' + y;
-				} else {
-					weekNr = y.toString();
-				}
-				const weekRoot = `weeks.${weekNr}`;
-
-				if (this.config.store_weeks) {
-					this.log.debug(`Creating states for week ${weekNr}`);
-					await this.doLocalStateCreate(stateID, weekRoot, weekNr);
-				} else if (stateDeletion) {
-					this.log.debug(`Deleting states for week ${weekNr} (if present)`);
-					await this.doLocalStateCreate(stateID, weekRoot, weekNr, false, true);
-				}
-			}
-
-			// create states for months
-			for (const month in months) {
-				const monthRoot = `months.${months[month]}`;
-
-				if (this.config.store_months) {
-					this.log.debug(`Creating states for month ${month}`);
-					await this.doLocalStateCreate(stateID, monthRoot, months[month]);
-				} else if (stateDeletion) {
-					this.log.debug(`Deleting states for month ${month} (if present)`);
-					await this.doLocalStateCreate(stateID, monthRoot, months[month], false, true);
-				}
-			}
-			// create states for quarters
-			for (let y = 1; y < 5; y++) {
-				const quarterRoot = `quarters.Q${y}`;
-				if (this.config.store_quarters) {
-					this.log.debug(`Creating states for quarter ${quarterRoot}`);
-					await this.doLocalStateCreate(stateID, quarterRoot, `Q${y}`);
-				} else if (stateDeletion) {
-					this.log.debug(`Deleting states for quarter ${quarterRoot} (if present)`);
-					await this.doLocalStateCreate(stateID, quarterRoot, quarterRoot, false, true);
-				}
-			}
+			await this.initializeYearStatisticsStates(stateID);
 
 			// Create basic current states
 			for (const state of basicStates) {
 				await this.doLocalStateCreate(stateID, state, state, false, false, true);
-				// .${actualDate.year}.
-
-				//ToDo 0.4.9: Check if current year storage in Year root should be configurable
-				if (state === '05_currentYear' &&  ((stateDetails.consumption || stateDetails.costs)
-					&& (this.config.store_quarters || this.config.store_months || this.config.store_weeks ))){
-					await this.doLocalStateCreate(stateID, `${actualDate.year}.${stateDetails.headCategory}Cumulative`, `${stateDetails.headCategory}Cumulative`, true, false, false);
-					await this.doLocalStateCreate(stateID, `${actualDate.year}.${stateDetails.financialCategory}Cumulative`, `${stateDetails.financialCategory}Cumulative`, true, false, false, useCurrency);
-
-				} else if (state === '05_currentYear' &&  (!this.config.store_weeks && !this.config.store_months && !this.config.store_quarters)) {
-					await this.doLocalStateCreate(stateID, `${actualDate.year}.${stateDetails.headCategory}Cumulative`, `${stateDetails.headCategory}Cumulative`, true, true, false);
-					await this.doLocalStateCreate(stateID, `${actualDate.year}.${stateDetails.financialCategory}Cumulative`, `${stateDetails.financialCategory}Cumulative`, true, true, false, useCurrency);
-
-				}
 			}
 
 			// Create basic current states for previous periods
@@ -1055,16 +1092,15 @@ class Sourceanalytix extends utils.Adapter {
 				for (const state of basicPreviousStates) {
 					await this.doLocalStateCreate(stateID, state, state, false, false, true);
 				}
+			} else if (stateDeletion) {
+				for (const state of basicPreviousStates) {
+					await this.doLocalStateCreate(stateID, state, state, false, true, true);
+				}
 			}
 
 			// Create state for cumulative reading
 			const stateName = 'cumulativeReading';
 			await this.doLocalStateCreate(stateID, stateName, 'Cumulative Reading', true);
-
-			// Create state for cumulative reading at Year statistics
-			if (this.config.store_weeks || this.config.store_months || this.config.store_quarters){
-				await this.doLocalStateCreate(stateID, `${actualDate.year}.readingCumulative`, 'Cumulative Reading of Year total', true);
-			}
 
 			// Handle calculation
 			const value = await this.getForeignStateAsync(stateID);
@@ -1211,13 +1247,13 @@ class Sourceanalytix extends utils.Adapter {
 			}
 
 			const date = new Date();
-			const calculationRounded = {
-				priceDay: await this.roundCosts(unitPrice * (reading - calcValues.start_day)),
-				priceWeek: await this.roundCosts(unitPrice * (reading - calcValues.start_week)),
-				priceMonth: await this.roundCosts(unitPrice * (reading - calcValues.start_month)),
-				priceQuarter: await this.roundCosts(unitPrice * (reading - calcValues.start_quarter)),
-				priceYear: await this.roundCosts(unitPrice * (reading - calcValues.start_year)),
-			};
+			const calculationRounded = await this.addBasicPriceTotals(stateID, {
+				priceDay: unitPrice * (reading - calcValues.start_day),
+				priceWeek: unitPrice * (reading - calcValues.start_week),
+				priceMonth: unitPrice * (reading - calcValues.start_month),
+				priceQuarter: unitPrice * (reading - calcValues.start_quarter),
+				priceYear: unitPrice * (reading - calcValues.start_year),
+			}, date);
 
 			await this.writeFinancialStates(stateID, calculationRounded, date);
 
@@ -1274,6 +1310,104 @@ class Sourceanalytix extends utils.Adapter {
 	}
 
 	/**
+	 * Copy completed generic periods to their configured previous-period states.
+	 * @param {object} stateDetails - Active state details
+	 * @param {object} changes - Changed calendar periods
+	 */
+	async copyPreviousPeriodStates(stateDetails, changes) {
+		if (!this.config.currentYearPrevious) return;
+		const periods = [
+			['day', '01_currentDay', '01_previousDay'],
+			['week', '02_currentWeek', '02_previousWeek'],
+			['month', '03_currentMonth', '03_previousMonth'],
+			['quarter', '04_currentQuarter', '04_previousQuarter'],
+			['year', '05_currentYear', '05_previousYear'],
+		];
+		for (const [period, currentState, previousState] of periods) {
+			if (!changes[period]) continue;
+			if (stateDetails.consumption) {
+				const root = `${stateDetails.deviceName}.currentYear.${stateDetails.headCategory}`;
+				await this.setPreviousValues(`${root}.${currentState}`, `${root}.${previousState}`);
+			}
+			if (stateDetails.costs) {
+				const root = `${stateDetails.deviceName}.currentYear.${stateDetails.financialCategory}`;
+				await this.setPreviousValues(`${root}.${currentState}`, `${root}.${previousState}`);
+			}
+			if (stateDetails.meter_values) {
+				await this.setPreviousValues(`${stateDetails.deviceName}.cumulativeReading`, `${stateDetails.deviceName}.currentYear.meterReadings.${previousState}`);
+			}
+		}
+	}
+
+	/**
+	 * Move weekday values to previousWeek and clear the new week.
+	 * @param {object} stateDetails - Active state details
+	 * @param {boolean} weekChanged - Whether a new week started
+	 */
+	async resetCurrentWeekdayStates(stateDetails, weekChanged) {
+		if (!weekChanged || !this.config.currentYearDays) return;
+		for (const weekday of weekdays) {
+			const stateRoots = [];
+			if (stateDetails.consumption) stateRoots.push(stateDetails.headCategory);
+			if (stateDetails.costs) stateRoots.push(stateDetails.financialCategory);
+			if (stateDetails.meter_values) stateRoots.push('meterReadings');
+			for (const root of stateRoots) {
+				const currentState = `${stateDetails.deviceName}.currentYear.${root}.currentWeek.${weekday}`;
+				if (this.config.currentYearPrevious) {
+					await this.setPreviousValues(currentState, `${stateDetails.deviceName}.currentYear.${root}.previousWeek.${weekday}`);
+				}
+				await this.setStateAsync(currentState, {val: 0, ack: true});
+			}
+		}
+	}
+
+	/**
+	 * Recalculate visible current-period values immediately after a calendar reset.
+	 * @param {string} stateID - Source state ID
+	 * @param {number} reading - Current cumulative reading
+	 * @param {Date} date - Reset date
+	 */
+	async writeCurrentPeriodValuesAfterReset(stateID, reading, date) {
+		const activeState = this.activeStates[stateID];
+		const stateDetails = activeState.stateDetails;
+		const calcValues = activeState.calcValues;
+		const consumed = {
+			consumedDay: reading - this.getNumberOrDefault(calcValues.start_day, reading),
+			consumedWeek: reading - this.getNumberOrDefault(calcValues.start_week, reading),
+			consumedMonth: reading - this.getNumberOrDefault(calcValues.start_month, reading),
+			consumedQuarter: reading - this.getNumberOrDefault(calcValues.start_quarter, reading),
+			consumedYear: reading - this.getNumberOrDefault(calcValues.start_year, reading),
+		};
+		const calculationRounded = {
+			consumedDay: await this.roundDigits(consumed.consumedDay),
+			consumedWeek: await this.roundDigits(consumed.consumedWeek),
+			consumedMonth: await this.roundDigits(consumed.consumedMonth),
+			consumedQuarter: await this.roundDigits(consumed.consumedQuarter),
+			consumedYear: await this.roundDigits(consumed.consumedYear),
+		};
+		if (stateDetails.consumption) await this.writeConsumptionStates(stateID, calculationRounded, date);
+
+		if (stateDetails.costs) {
+			let variableCosts;
+			if (this.isDynamicPriceState(stateID)) {
+				variableCosts = activeState.dynamicCosts ? activeState.dynamicCosts.totals : {};
+			} else {
+				const unitPrice = this.getNumberOrDefault(activeState.prices.unitPrice, 0);
+				variableCosts = {
+					priceDay: unitPrice * consumed.consumedDay,
+					priceWeek: unitPrice * consumed.consumedWeek,
+					priceMonth: unitPrice * consumed.consumedMonth,
+					priceQuarter: unitPrice * consumed.consumedQuarter,
+					priceYear: unitPrice * consumed.consumedYear,
+				};
+			}
+			Object.assign(calculationRounded, await this.addBasicPriceTotals(stateID, variableCosts, date));
+			await this.writeFinancialStates(stateID, calculationRounded, date);
+		}
+		previousCalculationRounded[stateID] = calculationRounded;
+	}
+
+	/**
 	 * Daily logic to store start values in memory and previous values at states
 	 */
 	async resetStartValues() {
@@ -1303,238 +1437,36 @@ class Sourceanalytix extends utils.Adapter {
 						this.log.debug(`Memory values for ${stateID} before reset : ${JSON.stringify(this.activeStates[stateID])}`);
 						this.log.debug(`Current known state values : ${JSON.stringify(stateValues)}`);
 
-						// Prepare custom object and store correct values
-						const obj = {};
-						obj.common = {};
-						obj.common.custom = {};
-						obj.common.custom[this.namespace] = {
-							start_day: reading,
-							start_month: beforeReset.month === actualDate.month ? stateValues.start_month : reading,
-							start_quarter: beforeReset.quarter === actualDate.quarter ? stateValues.start_quarter : reading,
-							start_week: beforeReset.week === actualDate.week ? stateValues.start_week : reading,
-							start_year: beforeReset.year === actualDate.year ? stateValues.start_year : reading,
-							valueAtDeviceInit: this.activeStates[stateID].calcValues.valueAtDeviceInit,
-							valueAtDeviceReset: this.activeStates[stateID].calcValues.valueAtDeviceReset,
+						const changes = calculation.getPeriodChanges(beforeReset, actualDate);
+						if (changes.year) await this.initializeYearStatisticsStates(stateID);
+						await this.copyPreviousPeriodStates(stateDetails, changes);
+						await this.resetCurrentWeekdayStates(stateDetails, changes.week);
+
+						const newCalcValues = {
+							start_day: changes.day ? reading : stateValues.start_day,
+							start_month: changes.month ? reading : stateValues.start_month,
+							start_quarter: changes.quarter ? reading : stateValues.start_quarter,
+							start_week: changes.week ? reading : stateValues.start_week,
+							start_year: changes.year ? reading : stateValues.start_year,
+							valueAtDeviceInit: stateValues.valueAtDeviceInit,
+							valueAtDeviceReset: stateValues.valueAtDeviceReset,
+							cumulativeValue: reading,
 						};
-
-						// Extend memory with objects for watt to kWh calculation
 						if (stateDetails.stateUnit === 'W') {
-							this.activeStates[stateID].calcValues.previousReadingWatt = null;
-							this.activeStates[stateID].calcValues.previousReadingWattTs = null;
+							newCalcValues.previousReadingWatt = null;
+							newCalcValues.previousReadingWattTs = null;
 						}
 
-							this.activeStates[stateID].calcValues = obj.common.custom[this.namespace];
-							this.activeStates[stateID].calcValues.cumulativeValue = reading;
-							await this.resetDynamicCostMemory(stateID, reading, beforeReset);
-
-						//At week reset ensure current week values are moved to previous week and current set to 0
-						if (beforeReset.week !== actualDate.week) {
-							for (const x in weekdays) {
-
-								if (this.config.currentYearDays) {
-
-									// Handle consumption states consumption states
-									if (stateDetails.consumption) {
-										switch (stateDetails.headCategory) {
-
-											case 'consumed':
-												await this.setPreviousValues(`${stateDetails.deviceName}.currentYear.consumed.currentWeek.${weekdays[x]}`, `${stateDetails.deviceName}.currentYear.consumed.previousWeek.${weekdays[x]}`);
-												await this.setStateAsync(`${stateDetails.deviceName}.currentYear.consumed.currentWeek.${weekdays[x]}`, {
-													val: 0,
-													ack: true
-												});
-												break;
-
-											case 'delivered':
-												await this.setPreviousValues(`${stateDetails.deviceName}.currentYear.delivered.currentWeek.${weekdays[x]}`, `${stateDetails.deviceName}.currentYear.delivered.previousWeek.${weekdays[x]}`);
-												await this.setStateAsync(`${stateDetails.deviceName}.currentYear.delivered.currentWeek.${weekdays[x]}`, {
-													val: 0,
-													ack: true
-												});
-												break;
-
-											default:
-
-										}
-
-									}
-
-									// Handle financial states consumption states
-									switch (stateDetails.financialCategory) {
-
-										case 'costs':
-											await this.setPreviousValues(`${stateDetails.deviceName}.currentYear.costs.currentWeek.${weekdays[x]}`, `${stateDetails.deviceName}.currentYear.costs.previousWeek.${weekdays[x]}`);
-											await this.setStateAsync(`${stateDetails.deviceName}.currentYear.costs.currentWeek.${weekdays[x]}`, {
-												val: 0,
-												ack: true
-											});
-											break;
-
-										case 'earnings':
-											await this.setPreviousValues(`${stateDetails.deviceName}.currentYear.earnings.currentWeek.${weekdays[x]}`, `${stateDetails.deviceName}.currentYear.earnings.previousWeek.${weekdays[x]}`);
-											await this.setStateAsync(`${stateDetails.deviceName}.currentYear.earnings.currentWeek.${weekdays[x]}`, {
-												val: 0,
-												ack: true
-											});
-											break;
-
-										default:
-
-									}
-
-									// Handle meter reading states
-									await this.setPreviousValues(`${stateDetails.deviceName}.currentYear.meterReadings.currentWeek.${weekdays[x]}`, `${stateDetails.deviceName}.currentYear.meterReadings.previousWeek.${weekdays[x]}`);
-									await this.setStateAsync(`${stateDetails.deviceName}.currentYear.meterReadings.currentWeek.${weekdays[x]}`, {
-										val: 0,
-										ack: true
-									});
-
-								}
-
-							}
-						}
-
-						// Handle all "previous states"
-						if (this.config.currentYearPrevious) {
-							// Handle consumption states consumption states
-							if (stateDetails.consumption) {
-								switch (stateDetails.headCategory) {
-
-									case 'consumed':
-										if (beforeReset.day !== actualDate.day) {
-											await this.setPreviousValues(`${stateDetails.deviceName}.currentYear.consumed.01_currentDay`,
-												`${stateDetails.deviceName}.currentYear.consumed.01_previousDay`);
-										}
-
-										if (beforeReset.week !== actualDate.week) {
-											await this.setPreviousValues(`${stateDetails.deviceName}.currentYear.consumed.02_currentWeek`, `${stateDetails.deviceName}.currentYear.consumed.02_previousWeek`);
-										}
-
-										if (beforeReset.month !== actualDate.month) {
-											await this.setPreviousValues(`${stateDetails.deviceName}.currentYear.consumed.03_currentMonth`, `${stateDetails.deviceName}.currentYear.consumed.03_previousMonth`);
-										}
-
-										if (beforeReset.quarter !== actualDate.quarter) {
-											await this.setPreviousValues(`${stateDetails.deviceName}.currentYear.consumed.04_currentQuarter`, `${stateDetails.deviceName}.currentYear.consumed.04_previousQuarter`);
-										}
-
-										if (beforeReset.year !== actualDate.year) {
-											await this.setPreviousValues(`${stateDetails.deviceName}.currentYear.consumed.05_currentYear`, `${stateDetails.deviceName}.currentYear.consumed.05_previousYear`);
-										}
-
-										break;
-
-									case 'delivered':
-										if (beforeReset.day !== actualDate.day) {
-											await this.setPreviousValues(`${stateDetails.deviceName}.currentYear.delivered.01_currentDay`, `${stateDetails.deviceName}.currentYear.delivered.01_previousDay`);
-										}
-
-										if (beforeReset.week !== actualDate.week) {
-											await this.setPreviousValues(`${stateDetails.deviceName}.currentYear.delivered.02_currentWeek`, `${stateDetails.deviceName}.currentYear.delivered.02_previousWeek`);
-										}
-
-										if (beforeReset.month !== actualDate.month) {
-											await this.setPreviousValues(`${stateDetails.deviceName}.currentYear.delivered.03_currentMonth`, `${stateDetails.deviceName}.currentYear.delivered.03_previousMonth`);
-										}
-
-										if (beforeReset.quarter !== actualDate.quarter) {
-											await this.setPreviousValues(`${stateDetails.deviceName}.currentYear.delivered.04_currentQuarter`, `${stateDetails.deviceName}.currentYear.delivered.04_previousQuarter`);
-										}
-
-										if (beforeReset.year !== actualDate.year) {
-											await this.setPreviousValues(`${stateDetails.deviceName}.currentYear.delivered.05_currentYear`, `${stateDetails.deviceName}.currentYear.delivered.05_previousYear`);
-										}
-										break;
-
-									default:
-
-								}
-
-							}
-
-							// Handle financial states consumption states
-							switch (stateDetails.financialCategory) {
-
-								case 'costs':
-									if (beforeReset.day !== actualDate.day) {
-										await this.setPreviousValues(`${stateDetails.deviceName}.currentYear.costs.01_currentDay`, `${stateDetails.deviceName}.currentYear.costs.01_previousDay`);
-									}
-
-									if (beforeReset.week !== actualDate.week) {
-										await this.setPreviousValues(`${stateDetails.deviceName}.currentYear.costs.02_currentWeek`, `${stateDetails.deviceName}.currentYear.costs.02_previousWeek`);
-									}
-
-									if (beforeReset.month !== actualDate.month) {
-										await this.setPreviousValues(`${stateDetails.deviceName}.currentYear.costs.03_currentMonth`, `${stateDetails.deviceName}.currentYear.costs.03_previousMonth`);
-									}
-
-									if (beforeReset.quarter !== actualDate.quarter) {
-										await this.setPreviousValues(`${stateDetails.deviceName}.currentYear.costs.04_currentQuarter`, `${stateDetails.deviceName}.currentYear.costs.04_previousQuarter`);
-									}
-
-									if (beforeReset.year !== actualDate.year) {
-										await this.setPreviousValues(`${stateDetails.deviceName}.currentYear.costs.05_currentYear`, `${stateDetails.deviceName}.currentYear.costs.05_previousYear`);
-									}
-									break;
-
-								case 'earnings':
-									if (beforeReset.day !== actualDate.day) {
-										await this.setPreviousValues(`${stateDetails.deviceName}.currentYear.earnings.01_currentDay`, `${stateDetails.deviceName}.currentYear.earnings.01_previousDay`);
-									}
-
-									if (beforeReset.week !== actualDate.week) {
-										await this.setPreviousValues(`${stateDetails.deviceName}.currentYear.earnings.02_currentWeek`, `${stateDetails.deviceName}.currentYear.earnings.02_previousWeek`);
-									}
-
-									if (beforeReset.month !== actualDate.month) {
-										await this.setPreviousValues(`${stateDetails.deviceName}.currentYear.earnings.03_currentMonth`, `${stateDetails.deviceName}.currentYear.earnings.03_previousMonth`);
-									}
-
-									if (beforeReset.quarter !== actualDate.quarter) {
-										await this.setPreviousValues(`${stateDetails.deviceName}.currentYear.earnings.04_currentQuarter`, `${stateDetails.deviceName}.currentYear.earnings.04_previousQuarter`);
-									}
-
-									if (beforeReset.year !== actualDate.year) {
-										await this.setPreviousValues(`${stateDetails.deviceName}.currentYear.earnings.05_currentYear`, `${stateDetails.deviceName}.currentYear.earnings.05_previousYear`);
-									}
-									break;
-
-								default:
-
-							}
-
-							//ToDo: Think / discuss what to do with meter readings
-							// Handle meter reading states
-							// if (this.config.currentYearPrevious) await this.setStateAsync(`${stateID}.currentYear.meterReadings.previousWeek.${weekdays[x]}`, {
-							// 	val: await this.getStateAsync(`${stateID}.currentYear.meterReadings.previousWeek.${weekdays[x]}`),
-							// 	ack: true
-							// })
-							
-							//derelvis
-							if (beforeReset.day !== actualDate.day) {
-								await this.setPreviousValues(`${stateDetails.deviceName}.cumulativeReading`, `${stateDetails.deviceName}.currentYear.meterReadings.01_previousDay`);
-							}
-
-							if (beforeReset.week !== actualDate.week) {
-								await this.setPreviousValues(`${stateDetails.deviceName}.cumulativeReading`, `${stateDetails.deviceName}.currentYear.meterReadings.02_previousWeek`);
-							}
-
-							if (beforeReset.month !== actualDate.month) {
-								await this.setPreviousValues(`${stateDetails.deviceName}.cumulativeReading`, `${stateDetails.deviceName}.currentYear.meterReadings.03_previousMonth`);
-							}
-
-							if (beforeReset.quarter !== actualDate.quarter) {
-								await this.setPreviousValues(`${stateDetails.deviceName}.cumulativeReading`, `${stateDetails.deviceName}.currentYear.meterReadings.04_previousQuarter`);
-							}
-
-							if (beforeReset.year !== actualDate.year) {
-								await this.setPreviousValues(`${stateDetails.deviceName}.cumulativeReading`, `${stateDetails.deviceName}.currentYear.meterReadings.05_previousYear`);
-							}
-							//derelvis end
-
-						}
-
-						await this.extendForeignObject(stateID, obj);
+						this.activeStates[stateID].calcValues = newCalcValues;
+						await this.resetDynamicCostMemory(stateID, reading, beforeReset);
+						await this.extendForeignObject(stateID, {
+							common: {
+								custom: {
+									[this.namespace]: newCalcValues,
+								},
+							},
+						});
+						await this.writeCurrentPeriodValuesAfterReset(stateID, reading, new Date());
 						this.log.info(`Memory values after reset : ${JSON.stringify(this.activeStates[stateID])}`);
 
 					} catch (error) {
@@ -1876,6 +1808,20 @@ class Sourceanalytix extends utils.Adapter {
 				await this.extendForeignObject(stateID, obj);
 			};
 
+			if (calcValues.valueAtDeviceReset !== null && currentCath !== 'Watt') {
+				const readingWithResetOffset = reading + this.getNumberOrDefault(calcValues.valueAtDeviceReset, 0);
+				const readingClassification = calculation.classifyCumulativeReading(
+					readingWithResetOffset,
+					this.getNumberOrDefault(calcValues.cumulativeValue, readingWithResetOffset),
+					stateDetails.deviceResetLogicEnabled,
+					this.getNumberOrDefault(stateDetails.threshold, 0),
+				);
+				if (readingClassification.type === 'jitter') {
+					this.log.debug(`[calculationHandler] Ignoring cumulative reading jitter of ${readingClassification.decrease} for ${stateID}`);
+					return;
+				}
+			}
+
 			// Verify if state is initiated for the first time, if not handle initialisation
 			if (calcValues.valueAtDeviceReset == null && currentCath !== 'Watt'){
 				this.log.info(`Initiating ${stateID} for the first time in SourceAnalytix`);
@@ -1955,10 +1901,12 @@ class Sourceanalytix extends utils.Adapter {
 
 				// Store meter reading to related period
 				if (readingRounded) {
-					await this.setStateChangedAsync(`${stateName}.currentWeek.${weekdays[date.getDay()]}`, {
-						val: readingRounded,
-						ack: true
-					});
+					if (this.config.currentYearDays) {
+						await this.setStateChangedAsync(`${stateName}.currentWeek.${weekdays[date.getDay()]}`, {
+							val: readingRounded,
+							ack: true
+						});
+					}
 					stateName = `${`${this.namespace}.${stateDetails.deviceName}`}.${actualDate.year}.meterReadings`;
 					if (storeSettings.storeWeeks) await this.setStateChangedAsync(`${stateName}.weeks.${actualDate.week}`, {
 						val: readingRounded,
@@ -2000,85 +1948,27 @@ class Sourceanalytix extends utils.Adapter {
 				consumedMonth: await this.roundDigits(calculations.consumedMonth),
 				consumedQuarter: await this.roundDigits(calculations.consumedQuarter),
 				consumedYear: await this.roundDigits(calculations.consumedYear),
-				priceDay: await this.roundCosts(unitPrice * calculations.consumedDay),
-				priceWeek: await this.roundCosts(unitPrice * calculations.consumedWeek),
-				priceMonth: await this.roundCosts(unitPrice * calculations.consumedMonth),
-				priceQuarter: await this.roundCosts(unitPrice * calculations.consumedQuarter),
-				priceYear: await this.roundCosts(unitPrice * calculations.consumedYear),
 			};
 
+			let variableCosts = {
+				priceDay: calculations.priceDay,
+				priceWeek: calculations.priceWeek,
+				priceMonth: calculations.priceMonth,
+				priceQuarter: calculations.priceQuarter,
+				priceYear: calculations.priceYear,
+			};
 			if (this.isDynamicPriceState(stateID)) {
 				const dynamicCalculationRounded = await this.calculateDynamicCostsForState(stateID, reading, readingTimestamp);
-				if (dynamicCalculationRounded) {
-					calculationRounded.priceDay = dynamicCalculationRounded.priceDay;
-					calculationRounded.priceWeek = dynamicCalculationRounded.priceWeek;
-					calculationRounded.priceMonth = dynamicCalculationRounded.priceMonth;
-					calculationRounded.priceQuarter = dynamicCalculationRounded.priceQuarter;
-					calculationRounded.priceYear = dynamicCalculationRounded.priceYear;
+				if (dynamicCalculationRounded && this.activeStates[stateID].dynamicCosts) {
+					variableCosts = this.activeStates[stateID].dynamicCosts.totals;
 				}
 			}
+			if (stateDetails.costs) Object.assign(calculationRounded, await this.addBasicPriceTotals(stateID, variableCosts, date));
 
 			// this.visWidgetJson[stateID].date = calculationRounded;
 			this.log.debug(`[calculationHandler] Result of rounding: ${JSON.stringify(calculations)}`);
 
-			// Store consumption
-			if (stateDetails.consumption) {
-				// Always write generic meterReadings for current year
-				stateName = `${this.namespace}.${stateDetails.deviceName}.currentYear.${stateDetails.headCategory}`;
-				// Generic
-				await this.setStateChangedAsync(`${stateName}.01_currentDay`, {
-					val: calculationRounded.consumedDay,
-					ack: true
-				});
-				await this.setStateChangedAsync(`${stateName}.02_currentWeek`, {
-					val: calculationRounded.consumedWeek,
-					ack: true
-				});
-				await this.setStateChangedAsync(`${stateName}.03_currentMonth`, {
-					val: calculationRounded.consumedMonth,
-					ack: true
-				});
-				await this.setStateChangedAsync(`${stateName}.04_currentQuarter`, {
-					val: calculationRounded.consumedQuarter,
-					ack: true
-				});
-				await this.setStateChangedAsync(`${stateName}.05_currentYear`, {
-					val: calculationRounded.consumedYear,
-					ack: true
-				});
-				if (this.config.store_weeks || this.config.store_months || this.config.store_quarters) {
-					await this.setStateChangedAsync(`${this.namespace}.${stateDetails.deviceName}.${actualDate.year}.${stateDetails.headCategory}Cumulative`, {
-						val: calculationRounded.consumedYear,
-						ack: true
-					});
-				}
-
-				// Weekdays
-				//ToDo 0.4.9 : Write to JSON
-				await this.setStateChangedAsync(`${stateName}.currentWeek.${weekdays[date.getDay()]}`, {
-					val: calculationRounded.consumedDay,
-					ack: true
-				});
-
-
-				stateName = `${this.namespace}.${stateDetails.deviceName}.${actualDate.year}.${stateDetails.headCategory}`;
-				// Week
-				if (storeSettings.storeWeeks) await this.setStateChangedAsync(`${stateName}.weeks.${actualDate.week}`, {
-					val: calculationRounded.consumedWeek,
-					ack: true
-				});
-				// Month
-				if (storeSettings.storeMonths) await this.setStateChangedAsync(`${stateName}.months.${actualDate.month}`, {
-					val: calculationRounded.consumedMonth,
-					ack: true
-				});
-				// Quarter
-				if (storeSettings.storeQuarters) await this.setStateChangedAsync(`${stateName}.quarters.Q${actualDate.quarter}`, {
-					val: calculationRounded.consumedQuarter,
-					ack: true
-				});
-
-			}
+			if (stateDetails.consumption) await this.writeConsumptionStates(stateID, calculationRounded, date);
 
 			// Store prices
 			if (stateDetails.costs) {

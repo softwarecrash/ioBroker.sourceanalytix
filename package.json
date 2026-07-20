@@ -27,6 +27,7 @@
   "files": [
     "admin",
     "io-package.json",
+    "lib/calculation.js",
     "lib/dynamic-pricing.js",
     "main.js"
   ],

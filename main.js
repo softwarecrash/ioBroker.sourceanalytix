@@ -29,8 +29,8 @@ const actualDate = {}; //, currentDay = null;
 
 class Sourceanalytix extends utils.Adapter {
 	/**
-     * @param {Partial<utils.AdapterOptions>} [options={}]
-     */
+	 * @param {Partial<utils.AdapterOptions>} [options] - Adapter startup options
+	 */
 	constructor(options) {
 		super({
 			...options,
@@ -56,8 +56,8 @@ class Sourceanalytix extends utils.Adapter {
 	}
 
 	/**
-     * Is called when databases are connected and adapter received configuration.
-     */
+	 * Is called when databases are connected and adapter received configuration.
+	 */
 	async onReady() {
 		try {
 
@@ -180,10 +180,10 @@ class Sourceanalytix extends utils.Adapter {
 	}
 
 	/**
-     * Convert configured or state-provided prices to numbers.
-     * @param {any} value - Price value from settings or ioBroker state
-     * @returns {number | null}
-     */
+	 * Convert configured or state-provided prices to numbers.
+	 * @param {ioBroker.StateValue | undefined} value - Price value from settings or ioBroker state
+	 * @returns {number | null} Parsed price, or null if the value is not numeric
+	 */
 	parsePriceValue(value) {
 		if (value === null || value === undefined || value === '') return null;
 		if (typeof value === 'number') return Number.isFinite(value) ? value : null;
@@ -195,53 +195,53 @@ class Sourceanalytix extends utils.Adapter {
 	}
 
 	/**
-     * @param {any} value - Input value
-     * @param {number} defaultValue - Fallback for non-numeric values
-     * @returns {number}
-     */
+	 * @param {ioBroker.StateValue | undefined} value - Input value
+	 * @param {number} defaultValue - Fallback for non-numeric values
+	 * @returns {number} Parsed number or the provided fallback
+	 */
 	getNumberOrDefault(value, defaultValue) {
 		const parsedValue = this.parsePriceValue(value);
 		return parsedValue === null ? defaultValue : parsedValue;
 	}
 
 	/**
-     * @param {string} stateID - Source state ID
-     * @returns {boolean}
-     */
+	 * @param {string} stateID - Source state ID
+	 * @returns {boolean} Whether the state uses a dynamic price source
+	 */
 	isDynamicPriceState(stateID) {
 		const activeState = this.activeStates[stateID];
 		return !!(activeState && activeState.prices && activeState.prices.priceSource === 'state');
 	}
 
 	/**
-     * @param {any} timestamp - ioBroker timestamp
-     * @returns {number}
-     */
+	 * @param {number | string | null | undefined} timestamp - ioBroker timestamp
+	 * @returns {number} Valid timestamp or the current time
+	 */
 	getTimestampOrNow(timestamp) {
 		const parsedTimestamp = Number(timestamp);
 		return Number.isFinite(parsedTimestamp) && parsedTimestamp > 0 ? parsedTimestamp : Date.now();
 	}
 
 	/**
-     * @param {ioBroker.State | null | undefined} state - ioBroker state
-     * @returns {number}
-     */
+	 * @param {ioBroker.State | null | undefined} state - ioBroker state
+	 * @returns {number} State change timestamp or the current time
+	 */
 	getStateChangeTimestamp(state) {
 		return this.getTimestampOrNow(state && (state.lc || state.ts));
 	}
 
 	/**
-     * @param {string} priceDefinition - Price definition category
-     * @returns {string}
-     */
+	 * @param {string} priceDefinition - Price definition category
+	 * @returns {string} Local state ID for the price history
+	 */
 	getPriceHistoryStateName(priceDefinition) {
 		return `priceHistory.${priceDefinition.toString().replace(/[^a-zA-Z0-9_-]/g, '_')}`;
 	}
 
 	/**
-     * @param {Array<any>} historyEntries - Raw history entries
-     * @returns {Array<object>}
-     */
+	 * @param {Array<{ts: number | string, price: ioBroker.StateValue}>} historyEntries - Raw history entries
+	 * @returns {Array<{ts: number, price: number}>} Sorted and validated price history
+	 */
 	normalizePriceHistory(historyEntries) {
 		if (!Array.isArray(historyEntries)) return [];
 
@@ -270,8 +270,8 @@ class Sourceanalytix extends utils.Adapter {
 	}
 
 	/**
-     * @param {string} priceDefinition - Price definition category
-     */
+	 * @param {string} priceDefinition - Price definition category
+	 */
 	async ensurePriceHistoryState(priceDefinition) {
 		const stateName = this.getPriceHistoryStateName(priceDefinition);
 		await this.extendObjectAsync(stateName, {
@@ -291,9 +291,9 @@ class Sourceanalytix extends utils.Adapter {
 	}
 
 	/**
-     * @param {string} priceDefinition - Price definition category
-     * @returns {Promise<Array<object>>}
-     */
+	 * @param {string} priceDefinition - Price definition category
+	 * @returns {Promise<Array<{ts: number, price: number}>>} Stored price history
+	 */
 	async loadPriceHistory(priceDefinition) {
 		if (this.priceHistories[priceDefinition]) return this.priceHistories[priceDefinition];
 
@@ -314,8 +314,8 @@ class Sourceanalytix extends utils.Adapter {
 	}
 
 	/**
-     * @param {string} priceDefinition - Price definition category
-     */
+	 * @param {string} priceDefinition - Price definition category
+	 */
 	async persistPriceHistory(priceDefinition) {
 		await this.ensurePriceHistoryState(priceDefinition);
 		const stateName = this.getPriceHistoryStateName(priceDefinition);
@@ -326,11 +326,11 @@ class Sourceanalytix extends utils.Adapter {
 	}
 
 	/**
-     * @param {string} priceDefinition - Price definition category
-     * @param {any} price - Dynamic unit price
-     * @param {any} timestamp - Timestamp from price state
-     * @returns {Promise<boolean>}
-     */
+	 * @param {string} priceDefinition - Price definition category
+	 * @param {ioBroker.StateValue | undefined} price - Dynamic unit price
+	 * @param {number | string | null | undefined} timestamp - Timestamp from price state
+	 * @returns {Promise<boolean>} Whether the stored history changed
+	 */
 	async storeDynamicPriceHistory(priceDefinition, price, timestamp) {
 		const priceNumber = this.parsePriceValue(price);
 		if (priceNumber === null) {
@@ -349,10 +349,7 @@ class Sourceanalytix extends utils.Adapter {
 			return true;
 		}
 
-		const previousEntry = history.reduce((previous, entry) => {
-			if (entry.ts <= priceTimestamp && (!previous || entry.ts > previous.ts)) return entry;
-			return previous;
-		}, null);
+		const previousEntry = history.filter(entry => entry.ts <= priceTimestamp).at(-1) || null;
 		if (previousEntry && previousEntry.price === priceNumber) return false;
 
 		history.push({ts: priceTimestamp, price: priceNumber});
@@ -363,11 +360,11 @@ class Sourceanalytix extends utils.Adapter {
 	}
 
 	/**
-     * @param {string} priceDefinition - Price definition category
-     * @param {number} timestamp - Consumption timestamp
-     * @param {any} fallbackPrice - Fallback unit price
-     * @returns {Promise<number | null>}
-     */
+	 * @param {string} priceDefinition - Price definition category
+	 * @param {number} timestamp - Consumption timestamp
+	 * @param {ioBroker.StateValue | undefined} fallbackPrice - Fallback unit price
+	 * @returns {Promise<number | null>} Price valid at the timestamp, or null if none is available
+	 */
 	async getDynamicPriceForTimestamp(priceDefinition, timestamp, fallbackPrice) {
 		const priceTimestamp = this.getTimestampOrNow(timestamp);
 		const history = await this.loadPriceHistory(priceDefinition);
@@ -387,14 +384,14 @@ class Sourceanalytix extends utils.Adapter {
 	}
 
 	/**
-     * Split a cumulative meter delta over all dynamic price intervals between two readings.
-     * @param {string} priceDefinition - Price definition category
-     * @param {number} delta - Consumption delta
-     * @param {any} startTimestamp - Previous reading timestamp
-     * @param {any} endTimestamp - Current reading timestamp
-     * @param {any} fallbackPrice - Fallback unit price
-     * @returns {Promise<number | null>}
-     */
+	 * Split a cumulative meter delta over all dynamic price intervals between two readings.
+	 * @param {string} priceDefinition - Price definition category
+	 * @param {number} delta - Consumption delta
+	 * @param {number | string | null | undefined} startTimestamp - Previous reading timestamp
+	 * @param {number | string | null | undefined} endTimestamp - Current reading timestamp
+	 * @param {ioBroker.StateValue | undefined} fallbackPrice - Fallback unit price
+	 * @returns {Promise<number | null>} Cost delta across all applicable price intervals
+	 */
 	async calculateDynamicPriceDelta(priceDefinition, delta, startTimestamp, endTimestamp, fallbackPrice) {
 		const startTs = Number(startTimestamp);
 		const endTs = this.getTimestampOrNow(endTimestamp);
@@ -428,11 +425,11 @@ class Sourceanalytix extends utils.Adapter {
 	}
 
 	/**
-     * @param {number} reading - Current cumulative reading
-     * @param {object} calcValues - Stored period start values
-     * @param {number} unitPrice - Unit price for fallback calculation
-     * @returns {object}
-     */
+	 * @param {number} reading - Current cumulative reading
+	 * @param {object} calcValues - Stored period start values
+	 * @param {number} unitPrice - Unit price for fallback calculation
+	 * @returns {object} Cost totals calculated with the fallback price
+	 */
 	getFallbackDynamicCostTotals(reading, calcValues, unitPrice) {
 		return {
 			priceDay: unitPrice * (reading - this.getNumberOrDefault(calcValues.start_day, reading)),
@@ -444,10 +441,10 @@ class Sourceanalytix extends utils.Adapter {
 	}
 
 	/**
-     * @param {string} stateID - Local ioBroker state ID
-     * @param {number} fallback - Fallback value
-     * @returns {Promise<number>}
-     */
+	 * @param {string} stateID - Local ioBroker state ID
+	 * @param {number} fallback - Fallback value
+	 * @returns {Promise<number>} Stored cost value or fallback
+	 */
 	async readCostStateOrFallback(stateID, fallback) {
 		try {
 			const state = await this.getStateAsync(stateID);
@@ -461,9 +458,9 @@ class Sourceanalytix extends utils.Adapter {
 	}
 
 	/**
-     * @param {object} dynamicCosts - Dynamic cost memory
-     * @returns {Promise<object>}
-     */
+	 * @param {object} dynamicCosts - Dynamic cost memory
+	 * @returns {Promise<object>} Rounded dynamic cost totals
+	 */
 	async roundDynamicCostTotals(dynamicCosts) {
 		return {
 			priceDay: await this.roundCosts(this.getNumberOrDefault(dynamicCosts.totals.priceDay, 0)),
@@ -475,12 +472,12 @@ class Sourceanalytix extends utils.Adapter {
 	}
 
 	/**
-     * Initialise dynamic cost memory from existing states, so restarts do not revalue past consumption.
-     * @param {string} stateID - Source state ID
-     * @param {number} reading - Current cumulative reading
-     * @param {any} timestamp - Timestamp of the current reading
-     * @returns {Promise<object | null>}
-     */
+	 * Initialise dynamic cost memory from existing states, so restarts do not revalue past consumption.
+	 * @param {string} stateID - Source state ID
+	 * @param {number} reading - Current cumulative reading
+	 * @param {number | string | null | undefined} timestamp - Timestamp of the current reading
+	 * @returns {Promise<object | null>} Dynamic cost memory, or null for unsupported states
+	 */
 	async ensureDynamicCostMemory(stateID, reading, timestamp) {
 		if (!this.isDynamicPriceState(stateID)) return null;
 		if (!this.activeStates[stateID] || !this.activeStates[stateID].stateDetails || !this.activeStates[stateID].calcValues) return null;
@@ -524,12 +521,12 @@ class Sourceanalytix extends utils.Adapter {
 	}
 
 	/**
-     * Add the newly consumed delta to dynamic cost totals with the active unit price.
-     * @param {string} stateID - Source state ID
-     * @param {number} reading - Current cumulative reading
-     * @param {any} timestamp - Timestamp of the current reading
-     * @returns {Promise<object | null>}
-     */
+	 * Add the newly consumed delta to dynamic cost totals with the active unit price.
+	 * @param {string} stateID - Source state ID
+	 * @param {number} reading - Current cumulative reading
+	 * @param {number | string | null | undefined} timestamp - Timestamp of the current reading
+	 * @returns {Promise<object | null>} Rounded dynamic costs, or null for unsupported states
+	 */
 	async calculateDynamicCostsForState(stateID, reading, timestamp) {
 		const dynamicCosts = await this.ensureDynamicCostMemory(stateID, reading, timestamp);
 		if (!dynamicCosts) return null;
@@ -579,11 +576,11 @@ class Sourceanalytix extends utils.Adapter {
 	}
 
 	/**
-     * Reset dynamic cost totals when period start values are reset.
-     * @param {string} stateID - Source state ID
-     * @param {number} reading - Current cumulative reading
-     * @param {object} beforeReset - Date information before reset
-     */
+	 * Reset dynamic cost totals when period start values are reset.
+	 * @param {string} stateID - Source state ID
+	 * @param {number} reading - Current cumulative reading
+	 * @param {object} beforeReset - Date information before reset
+	 */
 	resetDynamicCostMemory(stateID, reading, beforeReset) {
 		if (!this.isDynamicPriceState(stateID)) return;
 
@@ -607,11 +604,11 @@ class Sourceanalytix extends utils.Adapter {
 	}
 
 	/**
-     * Write financial calculation states.
-     * @param {string} stateID - Source state ID
-     * @param {object} calculationRounded - Rounded calculation values
-     * @param {Date} date - Current date
-     */
+	 * Write financial calculation states.
+	 * @param {string} stateID - Source state ID
+	 * @param {object} calculationRounded - Rounded calculation values
+	 * @param {Date} date - Current date
+	 */
 	async writeFinancialStates(stateID, calculationRounded, date) {
 		if (!this.activeStates[stateID] || !this.activeStates[stateID].stateDetails) return;
 
@@ -672,8 +669,8 @@ class Sourceanalytix extends utils.Adapter {
 	// }
 
 	/**
-     * Load calculation factors from helper library and store to memory
-     */
+	 * Load calculation factors from helper library and store to memory
+	 */
 	async definitionLoader() {
 		try {
 			// Load energy array and store exponents related to unit
@@ -1054,10 +1051,10 @@ class Sourceanalytix extends utils.Adapter {
 	}
 
 	/**
-     * Is called if an object changes to ensure (de-) activation of calculation or update configuration settings
-     * @param {string} id
-     * @param {ioBroker.Object | null | undefined} obj
-     */
+	 * Is called if an object changes to ensure (de-) activation of calculation or update configuration settings
+	 * @param {string} id - ID of the changed object
+	 * @param {ioBroker.Object | null | undefined} obj - Changed object, or null when deleted
+	 */
 	async onObjectChange(id, obj) {
 	    //ToDo : Verify with test-results if debounce on object change must be implemented
 		if (calcBlock) return; // cancel operation if calculation block is activate
@@ -1115,10 +1112,10 @@ class Sourceanalytix extends utils.Adapter {
 	}
 
 	/**
-     * Handle updates from dynamic price states and recalculate matching cost states.
-     * @param {string} priceStateID - ioBroker state ID of the dynamic price source
-     * @param {ioBroker.State} state - New price state value
-     */
+	 * Handle updates from dynamic price states and recalculate matching cost states.
+	 * @param {string} priceStateID - ioBroker state ID of the dynamic price source
+	 * @param {ioBroker.State} state - New price state value
+	 */
 	async handleDynamicPriceChange(priceStateID, state) {
 		try {
 			const unitPrice = this.parsePriceValue(state.val);
@@ -1152,10 +1149,10 @@ class Sourceanalytix extends utils.Adapter {
 	}
 
 	/**
-     * Recalculate only financial states from the stored cumulative reading.
-     * @param {string} stateID - Source state ID
-     * @param {string} reason - Log context
-     */
+	 * Recalculate only financial states from the stored cumulative reading.
+	 * @param {string} stateID - Source state ID
+	 * @param {string} reason - Log context
+	 */
 	async recalculateCostsForState(stateID, reason) {
 		try {
 			if (!this.activeStates[stateID] || !this.activeStates[stateID].stateDetails || !this.activeStates[stateID].calcValues) return;
@@ -1204,9 +1201,9 @@ class Sourceanalytix extends utils.Adapter {
 	}
 
 	/**
-     * Is called if a subscribed state changes
-     * @param {string} id of state
-     * @param {ioBroker.State | null | undefined} state
+	 * Is called if a subscribed state changes
+	 * @param {string} id of state
+	 * @param {ioBroker.State | null | undefined} state - Changed state, or null when deleted
 	 */
 	async onStateChange(id, state) {
 		if (calcBlock) return; // cancel operation if global calculation block is activate
@@ -1245,8 +1242,8 @@ class Sourceanalytix extends utils.Adapter {
 	}
 
 	/**
-     * Daily logic to store start values in memory and previous values at states
-     */
+	 * Daily logic to store start values in memory and previous values at states
+	 */
 	async resetStartValues() {
 		try {
 			const resetDay = new schedule('0 0 * * *', async () => {
@@ -1536,10 +1533,10 @@ class Sourceanalytix extends utils.Adapter {
 	}
 
 	/**
-     * Function to handle previousState values
-     * @param {string} currentState - RAW state ID currentValue
-     * @param {string} [previousState] - RAW state ID previousValue
-     */
+	 * Function to handle previousState values
+	 * @param {string} currentState - RAW state ID currentValue
+	 * @param {string} [previousState] - RAW state ID previousValue
+	 */
 	async setPreviousValues(currentState, previousState) {
 		// Only set previous state if option is chosen
 		try {
@@ -1566,15 +1563,15 @@ class Sourceanalytix extends utils.Adapter {
 	}
 
 	/**
-     * Function to handle state creation
-     * @param {string} stateID - RAW state ID of monitored state
-     * @param {string} stateRoot - Root folder location
-     * @param {string} name - Name of state (also used for state ID !
-     * @param {boolean} [atDeviceRoot=FALSE] - store value at root instead of Year-Folder
-     * @param {boolean} [deleteState=FALSE] - Set to true will delete the state
-     * @param {boolean} [isCurrent=FALSE] - Store value in current Year
-	 * @param {string} [forceUnit=''] - Force unit to be set on state
-     */
+	 * Function to handle state creation
+	 * @param {string} stateID - RAW state ID of monitored state
+	 * @param {string} stateRoot - Root folder location
+	 * @param {string} name - Name of state (also used for state ID !
+	 * @param {boolean} [atDeviceRoot] - store value at root instead of Year-Folder
+	 * @param {boolean} [deleteState] - Set to true will delete the state
+	 * @param {boolean} [isCurrent] - Store value in current Year
+	 * @param {string} [forceUnit] - Force unit to be set on state
+	 */
 	async doLocalStateCreate(stateID, stateRoot, name, atDeviceRoot, deleteState, isCurrent, forceUnit) {
 		this.log.debug(`[doLocalStateCreate] ${stateID} | root : ${stateRoot} | name : ${name}) | atDeviceRoot ${atDeviceRoot} | isCurrent : ${isCurrent}`);
 
@@ -1730,10 +1727,10 @@ class Sourceanalytix extends utils.Adapter {
 	}
 
 	/**
-     *Logic to handle all calculations
-     *  @param {string} [stateID] - state id of source value
-     *  @param {object} [stateVal] - object with current value (val) and timestamp (ts)
-     */
+	 *Logic to handle all calculations
+	 *  @param {string} [stateID] - state id of source value
+	 *  @param {object} [stateVal] - object with current value (val) and timestamp (ts)
+	 */
 	async calculationHandler(stateID, stateVal) {
 		try {
 			this.log.debug(`[calculationHandler] Calculation for ${stateID} with values : ${JSON.stringify(stateVal)}`);
@@ -2084,8 +2081,8 @@ class Sourceanalytix extends utils.Adapter {
 	// }
 
 	/**
-     * @param {number} [value] - Number to round with , separator
-     */
+	 * @param {number} [value] - Number to round with , separator
+	 */
 	async roundDigits(value) {
 		let rounded;
 		try {
@@ -2102,8 +2099,8 @@ class Sourceanalytix extends utils.Adapter {
 	}
 
 	/**
-     * @param {number} [value] - Number to round with . separator
-     */
+	 * @param {number} [value] - Number to round with . separator
+	 */
 	async roundCosts(value) {
 		try {
 			const numericValue = Number(value);
@@ -2122,9 +2119,9 @@ class Sourceanalytix extends utils.Adapter {
 	}
 
 	/**
-     * @param {string} [stateID]- ID of state
-     * @param {object} [value] - Current value in wH
-     */
+	 * @param {string} stateID - ID of the source state
+	 * @param {ioBroker.State} value - Current power value and timestamp
+	 */
 	async wattToWattHour(stateID, value) {
 		try {
 
@@ -2172,9 +2169,9 @@ class Sourceanalytix extends utils.Adapter {
 	}
 
 	/**
-     * @param {string} [stateID]- ID of state
-     * @param {object} [deviceName] - Name of device
-     */
+	 * @param {string} stateID - ID of the source state
+	 * @param {string} deviceName - Name of the device
+	 */
 	async getCumulatedValue(stateID, deviceName) {
 		this.log.debug(`[getCumulatedValue] ${stateID }`);
 		let valueSource; // For debugging purpose
@@ -2213,8 +2210,8 @@ class Sourceanalytix extends utils.Adapter {
 	}
 
 	/**
-     * Load current dates (year, week, month, quarter, day)
-     */
+	 * Load current dates (year, week, month, quarter, day)
+	 */
 	async refreshDates() {
 	    // Get current date
 		const today = new Date(); // Get current date in Unix time format
@@ -2238,9 +2235,9 @@ class Sourceanalytix extends utils.Adapter {
 	}
 
 	/**
-     * define proper week-number, add 0 in case of < 10
-     * @param {object} d - Current date (like initiated with new Date())
-     */
+	 * define proper week-number, add 0 in case of < 10
+	 * @param {object} d - Current date (like initiated with new Date())
+	 */
 	getWeekNumber(d) {
 		// Copy date so don't modify original
 		d = new Date(Date.UTC(d.getFullYear(), d.getMonth(), d.getDate()));
@@ -2260,11 +2257,13 @@ class Sourceanalytix extends utils.Adapter {
 	}
 
 	/**
-     * @param {string} [codePart]- Message Prefix
-     * @param {object} [error] - Sentry message
-     */
+	 * @param {string} codePart - Message prefix
+	 * @param {unknown} error - Error to report
+	 */
 	errorHandling(codePart, error) {
-		const msg = `[${codePart}] error: ${error.message}, stack: ${error.stack}`;
+		const errorMessage = error instanceof Error ? error.message : String(error);
+		const errorStack = error instanceof Error ? error.stack : undefined;
+		const msg = `[${codePart}] error: ${errorMessage}, stack: ${errorStack || 'not available'}`;
 		if (!disableSentry) {
 			if (this.supportsFeature && this.supportsFeature('PLUGINS')) {
 				const sentryInstance = this.getPluginInstance('sentry');
@@ -2312,8 +2311,9 @@ class Sourceanalytix extends utils.Adapter {
 	}
 
 	/**
-     * Is called when adapter shuts down - callback has to be called under any circumstances!
-     */
+	 * Is called when adapter shuts down - callback has to be called under any circumstances!
+	 * @param {() => void} callback - Signals that adapter shutdown is complete
+	 */
 	onUnload(callback) {
 		try {
 			this.log.info(`SourceAnalytix stopped, now you have to calculate by yourself :'( ...`);
@@ -2328,8 +2328,8 @@ class Sourceanalytix extends utils.Adapter {
 if (require.main !== module) {
 	// Export the constructor in compact mode
 	/**
-     * @param {Partial<utils.AdapterOptions>} [options={}]
-     */
+	 * @param {Partial<utils.AdapterOptions>} [options] - Adapter startup options
+	 */
 	module.exports = (options) => new Sourceanalytix(options);
 } else {
 	// otherwise start the instance directly

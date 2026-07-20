@@ -9,6 +9,7 @@
 const utils = require('@iobroker/adapter-core');
 const adapterHelpers = require('iobroker-adapter-helpers'); // Lib used for Unit calculations
 const schedule = require('cron').CronJob; // Cron Scheduler
+const dynamicPricing = require('./lib/dynamic-pricing');
 
 // Sentry error reporting, disable when testing alpha source code locally!
 const disableSentry = false;
@@ -185,13 +186,7 @@ class Sourceanalytix extends utils.Adapter {
 	 * @returns {number | null} Parsed price, or null if the value is not numeric
 	 */
 	parsePriceValue(value) {
-		if (value === null || value === undefined || value === '') return null;
-		if (typeof value === 'number') return Number.isFinite(value) ? value : null;
-		if (typeof value === 'string') {
-			const parsedValue = Number(value.trim().replace(',', '.'));
-			return Number.isFinite(parsedValue) ? parsedValue : null;
-		}
-		return null;
+		return dynamicPricing.parsePriceValue(value);
 	}
 
 	/**
@@ -243,30 +238,7 @@ class Sourceanalytix extends utils.Adapter {
 	 * @returns {Array<{ts: number, price: number}>} Sorted and validated price history
 	 */
 	normalizePriceHistory(historyEntries) {
-		if (!Array.isArray(historyEntries)) return [];
-
-		const normalizedHistory = [];
-		for (const entry of historyEntries) {
-			if (!entry) continue;
-			const timestamp = Number(entry.ts);
-			const price = this.parsePriceValue(entry.price);
-			if (!Number.isFinite(timestamp) || timestamp <= 0 || price === null) continue;
-			normalizedHistory.push({ts: timestamp, price: price});
-		}
-		normalizedHistory.sort((a, b) => a.ts - b.ts);
-
-		const deduplicatedHistory = [];
-		for (const entry of normalizedHistory) {
-			const previousEntry = deduplicatedHistory[deduplicatedHistory.length - 1];
-			if (previousEntry && previousEntry.ts === entry.ts) {
-				previousEntry.price = entry.price;
-			} else if (previousEntry && previousEntry.price === entry.price) {
-				continue;
-			} else {
-				deduplicatedHistory.push(entry);
-			}
-		}
-		return deduplicatedHistory;
+		return dynamicPricing.normalizePriceHistory(historyEntries);
 	}
 
 	/**
@@ -368,19 +340,7 @@ class Sourceanalytix extends utils.Adapter {
 	async getDynamicPriceForTimestamp(priceDefinition, timestamp, fallbackPrice) {
 		const priceTimestamp = this.getTimestampOrNow(timestamp);
 		const history = await this.loadPriceHistory(priceDefinition);
-		let selectedEntry = null;
-		for (const entry of history) {
-			if (entry.ts <= priceTimestamp) {
-				selectedEntry = entry;
-			} else {
-				break;
-			}
-		}
-		if (selectedEntry) return selectedEntry.price;
-
-		const fallbackPriceNumber = this.parsePriceValue(fallbackPrice);
-		if (fallbackPriceNumber !== null) return fallbackPriceNumber;
-		return history.length > 0 ? history[0].price : null;
+		return dynamicPricing.getPriceForTimestamp(history, priceTimestamp, fallbackPrice);
 	}
 
 	/**
@@ -393,35 +353,9 @@ class Sourceanalytix extends utils.Adapter {
 	 * @returns {Promise<number | null>} Cost delta across all applicable price intervals
 	 */
 	async calculateDynamicPriceDelta(priceDefinition, delta, startTimestamp, endTimestamp, fallbackPrice) {
-		const startTs = Number(startTimestamp);
 		const endTs = this.getTimestampOrNow(endTimestamp);
-		if (!Number.isFinite(startTs) || startTs <= 0 || startTs >= endTs) {
-			const priceAtReading = await this.getDynamicPriceForTimestamp(priceDefinition, endTs, fallbackPrice);
-			return priceAtReading === null ? null : delta * priceAtReading;
-		}
-
 		const history = await this.loadPriceHistory(priceDefinition);
-		const intervalChanges = history.filter(entry => entry.ts > startTs && entry.ts < endTs);
-		if (intervalChanges.length === 0) {
-			const priceAtReading = await this.getDynamicPriceForTimestamp(priceDefinition, endTs, fallbackPrice);
-			return priceAtReading === null ? null : delta * priceAtReading;
-		}
-
-		const totalDuration = endTs - startTs;
-		let segmentStart = startTs;
-		let priceDelta = 0;
-
-		for (const change of intervalChanges) {
-			const segmentPrice = await this.getDynamicPriceForTimestamp(priceDefinition, segmentStart, fallbackPrice);
-			if (segmentPrice === null) return null;
-			priceDelta += delta * ((change.ts - segmentStart) / totalDuration) * segmentPrice;
-			segmentStart = change.ts;
-		}
-
-		const finalSegmentPrice = await this.getDynamicPriceForTimestamp(priceDefinition, segmentStart, fallbackPrice);
-		if (finalSegmentPrice === null) return null;
-		priceDelta += delta * ((endTs - segmentStart) / totalDuration) * finalSegmentPrice;
-		return priceDelta;
+		return dynamicPricing.calculatePriceDelta(history, delta, startTimestamp, endTs, fallbackPrice);
 	}
 
 	/**

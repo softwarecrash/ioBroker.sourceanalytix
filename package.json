@@ -27,6 +27,7 @@
   "files": [
     "admin",
     "io-package.json",
+    "lib/dynamic-pricing.js",
     "main.js"
   ],
   "dependencies": {
@@ -43,6 +44,15 @@
     "@types/node": "^22.20.1",
     "mocha": "^11.7.6",
     "typescript": "^5.9.3"
+  },
+  "overrides": {
+    "@alcalzone/esbuild-register": {
+      "esbuild": "0.28.1"
+    },
+    "mocha": {
+      "diff": "8.0.4",
+      "serialize-javascript": "7.0.7"
+    }
   },
   "main": "main.js",
   "scripts": {

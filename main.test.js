@@ -81,6 +81,10 @@ describe('dynamic pricing', () => {
 		it('uses a configured fallback before the first known price', () => {
 			assert.equal(getPriceForTimestamp(history, at(9, 30), 0.2), 0.2);
 		});
+
+		it('returns no price before the first known entry without a fallback', () => {
+			assert.equal(getPriceForTimestamp(history, at(9, 30)), null);
+		});
 	});
 
 	describe('calculatePriceDelta', () => {
@@ -246,6 +250,15 @@ describe('period and cumulative calculations', () => {
 		it('keeps small backwards jitter at the accepted high-water mark', () => {
 			assert.deepEqual(resolveCumulativeReading(99.9, 0, 100, true, 0.2), {
 				type: 'jitter', decrease: 0.09999999999999432, reading: 100, resetOffset: 0,
+			});
+		});
+
+		it('keeps the last valid reading when the device reports a non-finite value', () => {
+			assert.deepEqual(resolveCumulativeReading(Number.NaN, 12, 100, true, 1), {
+				type: 'invalid', decrease: 0, reading: 100, resetOffset: 12,
+			});
+			assert.deepEqual(resolveCumulativeReading(Number.POSITIVE_INFINITY, 12, 100, true, 1), {
+				type: 'invalid', decrease: 0, reading: 100, resetOffset: 12,
 			});
 		});
 	});

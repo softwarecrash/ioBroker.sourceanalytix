@@ -1894,7 +1894,7 @@ class Sourceanalytix extends utils.Adapter {
 			const targetExponent = this.unitPriceDef.unitConfig[stateDetails.useUnit].exponent;
 			this.log.debug(`[calculationHandler] Reading value ${reading} before exponent multiplier | currentExponent : ${JSON.stringify(currentExponent)} | targetExponent : ${JSON.stringify(targetExponent)}`);
 			// Logic to handle exponents and handle watt reading
-			if (typeof (reading) === 'number' || reading === 0) {
+			if (Number.isFinite(reading)) {
 				if (currentCath === 'Watt') {
 					// Add calculated watt reading to stored totals
 					reading = (reading * Math.pow(10, (currentExponent - targetExponent))) + calcValues.cumulativeValue;
@@ -1906,7 +1906,7 @@ class Sourceanalytix extends utils.Adapter {
 				return;
 			}
 
-			if (reading === null || reading === undefined) {
+			if (!Number.isFinite(reading)) {
 				this.log.error(`[calculationHandler] reading incorrect after Exponent conversion contact DEV and provide these info | Reading : ${JSON.stringify(reading)} | start reading ${JSON.stringify(stateVal)} | currentExponent ${currentExponent} | targetExponent ${targetExponent} | stateDetails ${stateDetails}`);
 				return;
 			}
@@ -1930,6 +1930,10 @@ class Sourceanalytix extends utils.Adapter {
 						stateDetails.deviceResetLogicEnabled,
 						this.getNumberOrDefault(stateDetails.threshold, 0),
 					);
+					if (resolvedReading.type === 'invalid') {
+						this.log.warn(`[calculationHandler] Ignoring non-finite cumulative reading for ${stateID}`);
+						return;
+					}
 					if (resolvedReading.type === 'jitter') {
 						this.log.debug(`[calculationHandler] Ignoring cumulative reading jitter of ${resolvedReading.decrease} for ${stateID}`);
 						return;

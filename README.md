@@ -30,7 +30,7 @@ When the adapter crashes or another code error occurs, the error message which a
 - Integration of power readings over their actual update intervals, optionally ignoring negative readings
 - Recovery of missed calendar rollovers after a restart, on request or by an hourly check
 - Handling of meter resets, meter replacements and small backwards fluctuations
-- One compact, automatically updated statistics JSON state per active source
+- One structured statistics JSON state and two flat widget-compatible JSON views per active source
 
 ## Setup
 
@@ -197,6 +197,8 @@ For every source, SourceAnalytix creates a `cumulativeReading` and the enabled r
 | `<source>.currentYear.meterReadings` | Optional meter readings by enabled periods. |
 | `<source>.<year>` | Optional archived week, month and quarter statistics. |
 | `<source>.statisticsJson` | Compact current-year statistics for VIS, scripts and other adapters. |
+| `<source>.statisticsJsonCurrentWeek` | Flat weekday array for generic JSON table widgets. |
+| `<source>.statisticsJsonCurrentYear` | Flat month array for generic JSON table widgets. |
 
 The basic current and optional previous states use names such as `01_currentDay`, `02_currentWeek`, `03_currentMonth`, `04_currentQuarter`, `05_currentYear` and their `previous` equivalents.
 
@@ -261,6 +263,23 @@ Every active source automatically exposes a read-only `statisticsJson` state wit
 Weekdays use `1` for Monday through `7` for Sunday. Week and month keys are zero-padded, and quarter keys use `1` through `4`. Only current-year collections and the optional previous-period values are included, preventing the state from growing indefinitely. The ioBroker state timestamp indicates when the JSON was last changed.
 
 The state is rebuilt from existing statistics when the adapter starts and its writes are bundled during normal calculations. If a source is disabled or deleted, the last JSON value is retained together with the other calculated history and is no longer updated.
+
+For generic JSON table widgets, including the standard VIS 2 and Inventwo tables, every source also exposes `statisticsJsonCurrentWeek` and `statisticsJsonCurrentYear`. These states contain a top-level array with the fixed columns `date`, `value` and `price`. Week views contain Monday through Sunday and a total row; year views contain January through December and a total row.
+
+```json
+[
+  {"date":"Monday","value":6.651,"price":2.03},
+  {"date":"Tuesday","value":5.398,"price":1.65},
+  {"date":"Wednesday","value":0,"price":0},
+  {"date":"Thursday","value":0,"price":0},
+  {"date":"Friday","value":0,"price":0},
+  {"date":"Saturday","value":0,"price":0},
+  {"date":"Sunday","value":0,"price":0},
+  {"date":"Total","value":12.049,"price":3.68}
+]
+```
+
+Labels follow the configured ioBroker language, while values remain JSON numbers so widgets can sort, format and calculate them correctly. Missing periods and disabled financial calculations use `0`. The week and year arrays are empty when the corresponding weekday or month statistics are disabled in the instance settings. Both flat views are derived from `statisticsJson` and perform no separate calculations.
 
 ## Meter Resets And Corrections
 
@@ -345,6 +364,7 @@ This is a personal donation link for DutchmanNL and is not related to the ioBrok
 
 ### 0.5.4 (2026-08-01)
 * Each active source automatically exposes a compact `statisticsJson` state containing its current-year quantity, financial and optional meter-reading statistics ([#361](https://github.com/DrozmotiX/ioBroker.sourceanalytix/issues/361), [#967](https://github.com/DrozmotiX/ioBroker.sourceanalytix/issues/967)).
+* Flat current-week and current-year JSON arrays make the calculated values directly usable in standard VIS 2 and Inventwo table widgets without conversion scripts ([#361](https://github.com/DrozmotiX/ioBroker.sourceanalytix/issues/361)).
 * Monthly basic prices are no longer imported into the variable-cost accumulator and added a second time after a restart ([#1188](https://github.com/DrozmotiX/ioBroker.sourceanalytix/issues/1188)).
 
 ### 0.5.3 (2026-07-28)

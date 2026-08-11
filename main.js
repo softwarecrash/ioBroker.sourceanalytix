@@ -29,6 +29,7 @@ const storeSettings = {};
 let calcBlock = null; // Global variable to block all calculations
 let delay = null; // Global array for all running timers
 let useCurrency = null;
+let useLanguage = 'en';
 
 // Create variables for object arrays
 const actualDate = {}; //, currentDay = null;
@@ -89,6 +90,9 @@ class Sourceanalytix extends utils.Adapter {
 			} else {
 				useCurrency = '€';
 			}
+			useLanguage = sys_conf && sys_conf.common && typeof sys_conf.common.language === 'string'
+				? sys_conf.common.language
+				: 'en';
 
 			// Load Unit definitions from helper library & prices from admin to workable memory array
 			await this.definitionLoader();
@@ -1207,36 +1211,48 @@ class Sourceanalytix extends utils.Adapter {
 
 	/**
 	 * @param {string} stateID - Source state ID
-	 * @returns {string|null} Local JSON state ID
+	 * @returns {object|null} Local JSON state IDs by view
 	 */
-	getStatisticsJsonStateName(stateID) {
+	getStatisticsJsonStateNames(stateID) {
 		const activeState = this.activeStates[stateID];
-		return activeState && activeState.stateDetails
-			? `${activeState.stateDetails.deviceName}.statisticsJson`
-			: null;
+		if (!activeState || !activeState.stateDetails) return null;
+		const root = activeState.stateDetails.deviceName;
+		return {
+			snapshot: `${root}.statisticsJson`,
+			currentWeek: `${root}.statisticsJsonCurrentWeek`,
+			currentYear: `${root}.statisticsJsonCurrentYear`,
+		};
 	}
 
 	/**
 	 * @param {string} stateID - Source state ID
 	 */
 	async ensureStatisticsJsonState(stateID) {
-		const stateName = this.getStatisticsJsonStateName(stateID);
-		if (!stateName) return;
-		await this.extendObjectAsync(stateName, {
-			type: 'state',
-			common: {
-				name: 'Statistics JSON',
-				type: 'string',
-				role: 'json',
-				read: true,
-				write: false,
-				def: '',
-			},
-			native: {
-				sourceState: stateID,
-				schemaVersion: 1,
-			},
-		});
+		const stateNames = this.getStatisticsJsonStateNames(stateID);
+		if (!stateNames) return;
+		const definitions = [
+			{stateName: stateNames.snapshot, name: 'Statistics JSON', format: 'snapshot'},
+			{stateName: stateNames.currentWeek, name: 'Statistics JSON - Current week', format: 'currentWeek'},
+			{stateName: stateNames.currentYear, name: 'Statistics JSON - Current year', format: 'currentYear'},
+		];
+		for (const definition of definitions) {
+			await this.extendObjectAsync(definition.stateName, {
+				type: 'state',
+				common: {
+					name: definition.name,
+					type: 'string',
+					role: 'json',
+					read: true,
+					write: false,
+					def: '',
+				},
+				native: {
+					sourceState: stateID,
+					schemaVersion: 1,
+					format: definition.format,
+				},
+			});
+		}
 	}
 
 	/**
@@ -1245,8 +1261,8 @@ class Sourceanalytix extends utils.Adapter {
 	 */
 	async refreshStatisticsJson(stateID) {
 		const snapshot = this.createStatisticsJsonSnapshot(stateID);
-		const stateName = this.getStatisticsJsonStateName(stateID);
-		if (!snapshot || !stateName) return;
+		const stateNames = this.getStatisticsJsonStateNames(stateID);
+		if (!snapshot || !stateNames) return;
 
 		const deviceName = this.activeStates[stateID].stateDetails.deviceName;
 		const existingStates = await this.getStatesAsync(`${deviceName}.*`);
@@ -1262,10 +1278,12 @@ class Sourceanalytix extends utils.Adapter {
 			if (relativePath) statisticsJson.applyStatisticsState(snapshot, relativePath, state.val);
 		}
 
-		const existingJson = await this.getStateAsync(stateName);
-		this.statisticsJsonLastValues[stateID] = existingJson && typeof existingJson.val === 'string'
-			? existingJson.val
-			: null;
+		const existingJsonStates = await Promise.all(Object.values(stateNames).map(stateName => this.getStateAsync(stateName)));
+		this.statisticsJsonLastValues[stateID] = Object.keys(stateNames).reduce((result, key, index) => {
+			const state = existingJsonStates[index];
+			result[key] = state && typeof state.val === 'string' ? state.val : null;
+			return result;
+		}, {});
 		this.statisticsJsonSnapshots[stateID] = snapshot;
 		this.scheduleStatisticsJsonWrite(stateID);
 	}
@@ -1300,12 +1318,20 @@ class Sourceanalytix extends utils.Adapter {
 	async flushStatisticsJson(stateID) {
 		try {
 			const snapshot = this.statisticsJsonSnapshots[stateID];
-			const stateName = this.getStatisticsJsonStateName(stateID);
-			if (!snapshot || !stateName || !this.activeStates[stateID]) return;
-			const serialized = statisticsJson.serializeStatisticsSnapshot(snapshot);
-			if (serialized === this.statisticsJsonLastValues[stateID]) return;
-			await this.setStateChangedAsync(stateName, {val: serialized, ack: true});
-			this.statisticsJsonLastValues[stateID] = serialized;
+			const stateNames = this.getStatisticsJsonStateNames(stateID);
+			if (!snapshot || !stateNames || !this.activeStates[stateID]) return;
+			const serializedViews = {
+				snapshot: statisticsJson.serializeStatisticsSnapshot(snapshot),
+				currentWeek: JSON.stringify(statisticsJson.createFlatStatisticsView(snapshot, 'currentWeek', useLanguage)),
+				currentYear: JSON.stringify(statisticsJson.createFlatStatisticsView(snapshot, 'currentYear', useLanguage)),
+			};
+			const lastValues = this.statisticsJsonLastValues[stateID] || {};
+			for (const [view, serialized] of Object.entries(serializedViews)) {
+				if (serialized === lastValues[view]) continue;
+				await this.setStateChangedAsync(stateNames[view], {val: serialized, ack: true});
+				lastValues[view] = serialized;
+			}
+			this.statisticsJsonLastValues[stateID] = lastValues;
 		} catch (error) {
 			this.errorHandling(`[flushStatisticsJson] ${stateID}`, error);
 		}
